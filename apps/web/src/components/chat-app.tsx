@@ -94,8 +94,12 @@ export function ChatApp() {
   const [participantModalOpen, setParticipantModalOpen] = useState(false);
   const [deleteThreadModalOpen, setDeleteThreadModalOpen] = useState(false);
   const [deleteThreadPending, setDeleteThreadPending] = useState(false);
+  const [removingParticipantId, setRemovingParticipantId] = useState<string | null>(
+    null
+  );
   const [participantsToAdd, setParticipantsToAdd] = useState<string[]>([]);
   const [draft, setDraft] = useState("");
+  const [deletingMessageId, setDeletingMessageId] = useState<string | null>(null);
   const [reactionTargetId, setReactionTargetId] = useState<string | null>(null);
   const [conversationTab, setConversationTab] = useState<ConversationTab>("feed");
   const [connectionState, setConnectionState] =
@@ -156,6 +160,8 @@ export function ChatApp() {
         getDisplayUser(usersById, participantId)
       )
     : [];
+  const canKickParticipants =
+    Boolean(selectedThread) && profile?.id === selectedThread?.createdBy;
   const activeSearchResult = searchResults[activeSearchIndex] ?? null;
   const matchedMessageIds = new Set(searchResults.map((result) => result.messageId));
 
@@ -281,7 +287,9 @@ export function ChatApp() {
     setParticipantModalOpen(false);
     setDeleteThreadModalOpen(false);
     setDeleteThreadPending(false);
+    setRemovingParticipantId(null);
     setParticipantsToAdd([]);
+    setDeletingMessageId(null);
     setReactionTargetId(null);
     setConversationTab("feed");
     setSelectedAppId(null);
@@ -590,6 +598,31 @@ export function ChatApp() {
     }
   }
 
+  async function handleKickParticipant(participantId: string) {
+    if (!profile || !selectedThread || !canKickParticipants) {
+      return;
+    }
+
+    setRemovingParticipantId(participantId);
+
+    try {
+      await sendCommand({
+        command: "thread.participants.remove",
+        agentId: profile.id,
+        threadId: selectedThread.id,
+        participantIds: [participantId]
+      });
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error ? error.message : "Unable to remove participant."
+      );
+    } finally {
+      setRemovingParticipantId((current) =>
+        current === participantId ? null : current
+      );
+    }
+  }
+
   async function handleSendMessage() {
     if (!profile || !selectedThreadId || !draft.trim()) {
       return;
@@ -667,6 +700,30 @@ export function ChatApp() {
       setErrorMessage(
         error instanceof Error ? error.message : "Unable to update reaction."
       );
+    }
+  }
+
+  async function handleDeleteMessage(messageId: string) {
+    if (!profile || !selectedThreadId) {
+      return;
+    }
+
+    setDeletingMessageId(messageId);
+
+    try {
+      await sendCommand({
+        command: "message.delete",
+        threadId: selectedThreadId,
+        messageId,
+        agentId: profile.id
+      });
+      setReactionTargetId((current) => (current === messageId ? null : current));
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error ? error.message : "Unable to delete message."
+      );
+    } finally {
+      setDeletingMessageId((current) => (current === messageId ? null : current));
     }
   }
 
@@ -1390,6 +1447,10 @@ export function ChatApp() {
                               <div className="message-content">
                                 {renderMessage(message, {
                                   appLookup: activeAppEntriesById,
+                                  deletingMessageId,
+                                  onDeleteMessage: (messageId) => {
+                                    void handleDeleteMessage(messageId);
+                                  },
                                   onOpenApp: (appId) => {
                                     setConversationTab("apps");
                                     setSelectedAppId(appId);
@@ -1783,6 +1844,9 @@ export function ChatApp() {
                         </p>
 
                         <div className="participant-detail-badges">
+                          {user.id === selectedThread.createdBy ? (
+                            <span className="agent-pill">creator</span>
+                          ) : null}
                           {user.id === profile?.id ? (
                             <span className="agent-pill">you</span>
                           ) : null}
@@ -1798,6 +1862,19 @@ export function ChatApp() {
                     <p className="participant-detail-copy">
                       Joined {formatLongDate(user.createdAt)}
                     </p>
+
+                    {canKickParticipants && user.id !== selectedThread.createdBy ? (
+                      <div className="participant-detail-actions">
+                        <button
+                          className="ghost-button danger-button participant-kick-button"
+                          disabled={removingParticipantId === user.id}
+                          onClick={() => void handleKickParticipant(user.id)}
+                          type="button"
+                        >
+                          {removingParticipantId === user.id ? "Kicking..." : "Kick"}
+                        </button>
+                      </div>
+                    ) : null}
                   </article>
                 ))}
               </div>
@@ -2037,7 +2114,6 @@ function AppsPane({
       try {
         setGenerationPending(true);
         setFeedback(null);
-        setDraftSource("");
 
         const result = await onGenerateSource({
           prompt,
@@ -2664,6 +2740,8 @@ function renderMessage(
         };
       }
     >;
+    deletingMessageId?: string | null;
+    onDeleteMessage?: (messageId: string) => void;
     onOpenApp: (appId: string) => void;
     onValueChange: (appId: string, path: AppPathSegment[], value: AppJsonValue) => void;
   }
@@ -2677,7 +2755,10 @@ function renderMessage(
         app={entry?.app ?? null}
         appError={entry?.snapshot.error ?? null}
         appValue={entry?.snapshot.value ?? null}
+        deletePending={options?.deletingMessageId === message.id}
         fallbackName={embeddedApp.appName}
+        messageId={message.id}
+        onDeleteMessage={options?.onDeleteMessage}
         onOpenApp={options?.onOpenApp}
         onValueChange={options?.onValueChange}
       />
@@ -2698,14 +2779,20 @@ function EmbeddedAppMessage({
   app,
   appError,
   appValue,
+  deletePending = false,
   fallbackName,
+  messageId,
+  onDeleteMessage,
   onOpenApp,
   onValueChange
 }: {
   app: ThreadAppState | null;
   appError: string | null;
   appValue: AppJsonValue | null;
+  deletePending?: boolean;
   fallbackName: string;
+  messageId: string;
+  onDeleteMessage?: (messageId: string) => void;
   onOpenApp?: (appId: string) => void;
   onValueChange?: (appId: string, path: AppPathSegment[], value: AppJsonValue) => void;
 }) {
@@ -2724,17 +2811,32 @@ function EmbeddedAppMessage({
           ) : null}
         </div>
 
-        {app ? (
-          <button
-            aria-label={`Open ${app.name}`}
-            className="ghost-button icon-button message-app-embed-open"
-            onClick={() => onOpenApp?.(app.id)}
-            title={`Open ${app.name}`}
-            type="button"
-          >
-            <RiApps2Line aria-hidden="true" />
-          </button>
-        ) : null}
+        <div className="message-app-embed-actions">
+          {app ? (
+            <button
+              aria-label={`Open ${app.name}`}
+              className="ghost-button icon-button message-app-embed-open"
+              onClick={() => onOpenApp?.(app.id)}
+              title={`Open ${app.name}`}
+              type="button"
+            >
+              <RiApps2Line aria-hidden="true" />
+            </button>
+          ) : null}
+
+          {onDeleteMessage ? (
+            <button
+              aria-label="Delete shared app message"
+              className="ghost-button icon-button danger-button message-app-embed-delete"
+              disabled={deletePending}
+              onClick={() => onDeleteMessage(messageId)}
+              title="Delete shared app message"
+              type="button"
+            >
+              <RiDeleteBinLine aria-hidden="true" />
+            </button>
+          ) : null}
+        </div>
       </div>
 
       {appUnavailable ? (

@@ -736,6 +736,15 @@ textarea::placeholder {
   gap: var(--space-2);
 }
 
+.participant-detail-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.participant-kick-button {
+  min-width: 6.25rem;
+}
+
 .profile-identity,
 .kind-toggle-block {
   min-width: 0;
@@ -1350,6 +1359,13 @@ textarea::placeholder {
   gap: var(--space-3);
 }
 
+.message-app-embed-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
 .message-app-embed-copy {
   min-width: 0;
   display: grid;
@@ -1384,6 +1400,10 @@ textarea::placeholder {
 .message-app-embed-open {
   flex-shrink: 0;
   color: var(--text);
+}
+
+.message-app-embed-delete {
+  color: var(--text-soft);
 }
 
 .message-content pre {

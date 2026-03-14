@@ -20,6 +20,8 @@ const client = env.openAiApiKey
     })
   : null;
 const EMPTY_RESPONSE_ATTEMPTS = 3;
+const STREAM_RESPONSE_TIMEOUT_MS = 30_000;
+const STREAM_FINALIZE_TIMEOUT_MS = 10_000;
 
 export function isAiAvailable(): boolean {
   return client !== null;
@@ -213,6 +215,7 @@ export async function streamAppSource(
 
   const input = buildAppSourceInput(params);
   let streamedText = "";
+  let recoverableSource: string | null = null;
 
   const stream = client.responses.stream({
     model: env.chatModel,
@@ -223,12 +226,47 @@ export async function streamAppSource(
 
   stream.on("response.output_text.delta", (event) => {
     streamedText += event.delta;
+    recoverableSource = tryNormalizeGeneratedAppSource(streamedText) ?? recoverableSource;
     onDelta(event.delta);
   });
 
-  const finalResponse = await stream.finalResponse();
-  const finalText =
-    streamedText.trim() || extractResponseText(finalResponse).trim();
+  let finalResponse: { model: string; output?: unknown; output_text?: string } | null = null;
+
+  try {
+    finalResponse = await withTimeout(stream.finalResponse(), STREAM_RESPONSE_TIMEOUT_MS, () => {
+      stream.abort();
+    });
+  } catch (error) {
+    if (recoverableSource) {
+      return {
+        source: recoverableSource,
+        model: env.chatModel
+      };
+    }
+
+    const fallback = await generateText({
+      model: env.chatModel,
+      instructions: APP_SOURCE_INSTRUCTIONS,
+      input,
+      maxOutputTokens: 2_000,
+      retryReason:
+        error instanceof Error
+          ? error.message
+          : "Previous streaming attempt did not finish."
+    });
+
+    return {
+      source: await finalizeGeneratedAppSource({
+        currentSource: params.currentSource,
+        messages: params.messages,
+        prompt: params.prompt,
+        text: fallback.text
+      }),
+      model: fallback.model
+    };
+  }
+
+  const finalText = streamedText.trim() || extractResponseText(finalResponse).trim();
 
   if (!finalText) {
     const fallback = await generateText({
@@ -251,15 +289,56 @@ export async function streamAppSource(
     };
   }
 
-  return {
-    source: await finalizeGeneratedAppSource({
-      currentSource: params.currentSource,
-      messages: params.messages,
-      prompt: params.prompt,
-      text: finalText
-    }),
-    model: finalResponse.model
-  };
+  try {
+    return {
+      source: await withTimeout(
+        finalizeGeneratedAppSource(
+          {
+            currentSource: params.currentSource,
+            messages: params.messages,
+            prompt: params.prompt,
+            text: finalText
+          },
+          { repairAttempts: 1 }
+        ),
+        STREAM_FINALIZE_TIMEOUT_MS
+      ),
+      model: finalResponse.model
+    };
+  } catch (error) {
+    if (recoverableSource) {
+      return {
+        source: recoverableSource,
+        model: finalResponse.model
+      };
+    }
+
+    throw error;
+  }
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  onTimeout?: () => void
+): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timeoutId = setTimeout(() => {
+          onTimeout?.();
+          reject(new Error(`Generation timed out after ${Math.round(timeoutMs / 1000)}s.`));
+        }, timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
 }
 
 async function generateText(params: {
@@ -389,6 +468,11 @@ function buildAppSourceInput(params: {
   const seededSource = getSeedSource(params.currentSource);
 
   return [
+    params.threadLabel ? `Thread: ${params.threadLabel}` : null,
+    params.appName?.trim() ? `App name: ${params.appName.trim()}` : null,
+    params.appDescription?.trim()
+      ? `App description: ${params.appDescription.trim()}`
+      : null,
     seededSource
       ? ["Current JSON source:", seededSource].join("\n")
       : "There is no existing JSON source yet.",
@@ -411,6 +495,8 @@ async function finalizeGeneratedAppSource(params: {
   messages?: AiContextMessage[];
   prompt: string;
   text: string;
+}, options?: {
+  repairAttempts?: number;
 }): Promise<string> {
   const direct = tryNormalizeGeneratedAppSource(params.text);
   if (direct) {
@@ -418,8 +504,9 @@ async function finalizeGeneratedAppSource(params: {
   }
 
   let repairInput = params.text;
+  const repairAttempts = Math.max(0, options?.repairAttempts ?? 3);
 
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
+  for (let attempt = 1; attempt <= repairAttempts; attempt += 1) {
     repairInput = await repairGeneratedAppSource({
       ...params,
       attempt,

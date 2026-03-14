@@ -245,6 +245,12 @@ export type ChatCommand =
       agentId: string;
     }
   | {
+      command: "message.delete";
+      threadId: string;
+      messageId: string;
+      agentId: string;
+    }
+  | {
       command: "thread.app.create";
       agentId: string;
       threadId: string;

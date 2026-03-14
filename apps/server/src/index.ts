@@ -672,6 +672,22 @@ function parseCommand(value: unknown): ChatCommand | null {
         agentId: value.agentId
       };
     }
+    case "message.delete": {
+      if (
+        typeof value.threadId !== "string" ||
+        typeof value.messageId !== "string" ||
+        typeof value.agentId !== "string"
+      ) {
+        return null;
+      }
+
+      return {
+        command: "message.delete",
+        threadId: value.threadId,
+        messageId: value.messageId,
+        agentId: value.agentId
+      };
+    }
     case "thread.app.create": {
       if (
         typeof value.agentId !== "string" ||
@@ -878,7 +894,7 @@ function applyCommand(command: ChatCommand): CommandOutcome {
     }
     case "thread.participants.remove": {
       const thread = getThreadForAgent(command.threadId, command.agentId);
-      const removalIds = new Set(command.participantIds);
+      const removalIds = getParticipantRemovalIds(thread, command.agentId, command.participantIds);
       const nextParticipantIds = thread.participantIds.filter(
         (participantId) => !removalIds.has(participantId)
       );
@@ -898,6 +914,30 @@ function applyCommand(command: ChatCommand): CommandOutcome {
           updatedAt: new Date().toISOString()
         });
       }
+
+      return {
+        actorId: command.agentId
+      };
+    }
+    case "message.delete": {
+      const thread = getThreadForAgent(command.threadId, command.agentId);
+      const threadMessages = state.messagesByThread.get(thread.id) ?? [];
+      const messageIndex = threadMessages.findIndex(
+        (candidate) => candidate.id === command.messageId
+      );
+
+      if (messageIndex < 0) {
+        throw new Error("Message not found.");
+      }
+
+      threadMessages.splice(messageIndex, 1);
+      state.messagesByThread.set(thread.id, threadMessages);
+      state.messageEmbeddings.delete(command.messageId);
+
+      state.threads.set(thread.id, {
+        ...thread,
+        updatedAt: new Date().toISOString()
+      });
 
       return {
         actorId: command.agentId
@@ -1092,6 +1132,41 @@ function assertUser(agentId: string): void {
   if (!state.users.has(agentId)) {
     throw new Error(`Unknown agent: ${agentId}`);
   }
+}
+
+function getParticipantRemovalIds(
+  thread: ChatThread,
+  actorId: string,
+  participantIds: string[]
+): Set<string> {
+  const uniqueParticipantIds = uniqueIds(participantIds);
+
+  if (!uniqueParticipantIds.length) {
+    throw new Error("Pick at least one participant to remove.");
+  }
+
+  const removableParticipantIds = uniqueParticipantIds.filter((participantId) =>
+    thread.participantIds.includes(participantId)
+  );
+
+  if (!removableParticipantIds.length) {
+    throw new Error("Participant not found in this chat.");
+  }
+
+  if (removableParticipantIds.includes(thread.createdBy)) {
+    throw new Error("The chat creator cannot be removed from the chat.");
+  }
+
+  if (actorId !== thread.createdBy) {
+    const isSelfRemoval =
+      removableParticipantIds.length === 1 && removableParticipantIds[0] === actorId;
+
+    if (!isSelfRemoval) {
+      throw new Error("Only the chat creator can remove other participants.");
+    }
+  }
+
+  return new Set(removableParticipantIds);
 }
 
 function getThreadForAgent(threadId: string, agentId: string): ChatThread {
