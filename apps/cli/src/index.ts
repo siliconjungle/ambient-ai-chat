@@ -1,11 +1,16 @@
 #!/usr/bin/env node
 
+import * as Automerge from "@automerge/automerge";
 import { randomUUID } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import JSON5 from "json5";
 
 import {
+  type AppJsonValue,
+  type AppPathSegment,
+  type ThreadAppState,
   extractMessageText,
   createRandomUsername,
   type AgentKind,
@@ -18,7 +23,10 @@ import {
   type CommandRecommendationResponse,
   type MessageReaction,
   type ThreadSearchResponse,
-  type UserProfile
+  type UserProfile,
+  isAppJsonValue,
+  looksLikeJsonRenderSpec,
+  validateJsonRenderSpecShape
 } from "@social/shared";
 
 interface Identity {
@@ -42,7 +50,13 @@ interface WatchOptions {
   json: boolean;
 }
 
+interface CliThreadAppDocument {
+  value: AppJsonValue;
+}
+
 type ParsedFlags = Record<string, string | boolean>;
+
+const DEFAULT_APP_SOURCE = "{}";
 
 const args = process.argv.slice(2);
 const { positionals, flags } = parseArgs(args);
@@ -96,6 +110,10 @@ async function run() {
     }
     case "message": {
       await handleMessageCommand(positionals[1], flags);
+      return;
+    }
+    case "apps": {
+      await handleAppsCommand(positionals[1], flags);
       return;
     }
     case "react": {
@@ -451,6 +469,316 @@ async function handleMessageCommand(
   process.exitCode = 1;
 }
 
+async function handleAppsCommand(
+  subcommand: string | undefined,
+  commandFlags: ParsedFlags
+) {
+  const session = await getSession(commandFlags);
+  const threadId =
+    subcommand === "list" ||
+    subcommand === "show" ||
+    subcommand === "create" ||
+    subcommand === "delete" ||
+    subcommand === "meta" ||
+    subcommand === "save" ||
+    subcommand === "set" ||
+    subcommand === "share" ||
+    subcommand === "generate"
+      ? requireString(commandFlags.thread, "--thread is required.")
+      : null;
+
+  if (subcommand === "list" && threadId) {
+    const apps = buildAppsView(session.snapshot, threadId);
+
+    if (jsonOutput) {
+      printJson(apps);
+      return;
+    }
+
+    printApps(apps);
+    return;
+  }
+
+  if (subcommand === "show" && threadId) {
+    const appId = requireString(commandFlags.app, "--app is required.");
+    const appView = buildAppViewOrThrow(session.snapshot, threadId, appId);
+
+    if (jsonOutput) {
+      printJson(appView);
+      return;
+    }
+
+    printAppDetail(appView);
+    return;
+  }
+
+  if (subcommand === "create" && threadId) {
+    const source = await resolveAppSource(commandFlags);
+    const validatedSource = validateAppSource(source);
+    const response = await sendCommand(serverUrl, {
+      command: "thread.app.create",
+      agentId: session.identity.id,
+      threadId,
+      name: asOptionalString(commandFlags.name) ?? "Untitled app",
+      description: asOptionalString(commandFlags.description) ?? "",
+      source: validatedSource.source,
+      value: validatedSource.value
+    });
+    const snapshot = requireSnapshot(response);
+    const previousAppIds = new Set(
+      (session.snapshot.appsByThread[threadId] ?? []).map((app) => app.id)
+    );
+    const createdApp =
+      (snapshot.appsByThread[threadId] ?? []).find((app) => !previousAppIds.has(app.id)) ??
+      null;
+
+    if (jsonOutput) {
+      printJson(
+        createdApp ? buildAppView(snapshot, threadId, createdApp) : snapshot.appsByThread[threadId] ?? []
+      );
+      return;
+    }
+
+    console.log(
+      createdApp
+        ? `App created: ${createdApp.name} (${createdApp.id})`
+        : `App created in thread ${threadId}.`
+    );
+    return;
+  }
+
+  if (subcommand === "delete" && threadId) {
+    const appId = requireString(commandFlags.app, "--app is required.");
+    await sendCommand(serverUrl, {
+      command: "thread.app.delete",
+      agentId: session.identity.id,
+      threadId,
+      appId
+    });
+
+    if (jsonOutput) {
+      const refreshedSession = await getSession(commandFlags);
+      printJson(refreshedSession.snapshot.appsByThread[threadId] ?? []);
+      return;
+    }
+
+    console.log(`Deleted app ${appId}.`);
+    return;
+  }
+
+  if (subcommand === "meta" && threadId) {
+    const appId = requireString(commandFlags.app, "--app is required.");
+    const currentApp = getThreadAppOrThrow(session.snapshot, threadId, appId);
+    const nextName = asOptionalString(commandFlags.name) ?? currentApp.name;
+    const nextDescription =
+      asOptionalString(commandFlags.description) ?? currentApp.description;
+
+    await sendCommand(serverUrl, {
+      command: "thread.app.meta.update",
+      agentId: session.identity.id,
+      threadId,
+      appId,
+      name: nextName,
+      description: nextDescription
+    });
+
+    if (jsonOutput) {
+      const refreshedSession = await getSession(commandFlags);
+      printJson(buildAppViewOrThrow(refreshedSession.snapshot, threadId, appId));
+      return;
+    }
+
+    console.log(`Updated app metadata for ${appId}.`);
+    return;
+  }
+
+  if (subcommand === "save" && threadId) {
+    const appId = requireString(commandFlags.app, "--app is required.");
+    const source = await resolveAppSource(commandFlags);
+    const validatedSource = validateAppSource(source);
+
+    await sendCommand(serverUrl, {
+      command: "thread.app.source.save",
+      agentId: session.identity.id,
+      threadId,
+      appId,
+      source: validatedSource.source,
+      value: validatedSource.value
+    });
+
+    if (jsonOutput) {
+      const refreshedSession = await getSession(commandFlags);
+      printJson(buildAppViewOrThrow(refreshedSession.snapshot, threadId, appId));
+      return;
+    }
+
+    console.log(`Saved source for app ${appId}.`);
+    return;
+  }
+
+  if (subcommand === "set" && threadId) {
+    const appId = requireString(commandFlags.app, "--app is required.");
+    const path = parseAppPath(
+      requireString(commandFlags.path, "--path is required.")
+    );
+    const value = parseAppValueFromFlags(commandFlags);
+
+    await sendCommand(serverUrl, {
+      command: "thread.app.form.update",
+      agentId: session.identity.id,
+      threadId,
+      appId,
+      path,
+      value
+    });
+
+    if (jsonOutput) {
+      const refreshedSession = await getSession(commandFlags);
+      printJson(buildAppViewOrThrow(refreshedSession.snapshot, threadId, appId));
+      return;
+    }
+
+    console.log(`Updated app value at ${formatAppPath(path)}.`);
+    return;
+  }
+
+  if (subcommand === "share" && threadId) {
+    const appId = requireString(commandFlags.app, "--app is required.");
+    const app = getThreadAppOrThrow(session.snapshot, threadId, appId);
+
+    await sendCommand(serverUrl, {
+      command: "message.send",
+      threadId,
+      agentId: session.identity.id,
+      agentKind: session.identity.kind,
+      type: "chat.app.embed",
+      message: {
+        appId: app.id,
+        appName: app.name
+      }
+    });
+
+    if (jsonOutput) {
+      const refreshedSession = await getSession(commandFlags);
+      printJson(buildThreadView(refreshedSession.snapshot, getThreadOrThrow(refreshedSession.snapshot, threadId), refreshedSession.identity.id));
+      return;
+    }
+
+    console.log(`Shared app ${app.name} (${app.id}) to ${threadId}.`);
+    return;
+  }
+
+  if (subcommand === "generate" && threadId) {
+    const appId = asOptionalString(commandFlags.app);
+    const prompt = requireString(commandFlags.prompt, "--prompt is required.");
+    const apply = hasFlag(commandFlags, "apply");
+    const currentApp = appId ? getThreadAppOrThrow(session.snapshot, threadId, appId) : null;
+    const generation = await streamGeneratedAppSource(serverUrl, {
+      agentId: session.identity.id,
+      threadId,
+      name: asOptionalString(commandFlags.name) ?? currentApp?.name,
+      description:
+        asOptionalString(commandFlags.description) ?? currentApp?.description,
+      currentSource: currentApp?.savedSource,
+      prompt
+    }, {
+      streamToStdout: !jsonOutput
+    });
+
+    if (apply) {
+      const validatedSource = validateAppSource(generation.source);
+
+      if (currentApp) {
+        const nextName =
+          asOptionalString(commandFlags.name) ?? currentApp.name;
+        const nextDescription =
+          asOptionalString(commandFlags.description) ?? currentApp.description;
+
+        if (
+          nextName !== currentApp.name ||
+          nextDescription !== currentApp.description
+        ) {
+          await sendCommand(serverUrl, {
+            command: "thread.app.meta.update",
+            agentId: session.identity.id,
+            threadId,
+            appId: currentApp.id,
+            name: nextName,
+            description: nextDescription
+          });
+        }
+
+        await sendCommand(serverUrl, {
+          command: "thread.app.source.save",
+          agentId: session.identity.id,
+          threadId,
+          appId: currentApp.id,
+          source: validatedSource.source,
+          value: validatedSource.value
+        });
+
+        if (jsonOutput) {
+          const refreshedSession = await getSession(commandFlags);
+          printJson({
+            app: buildAppViewOrThrow(refreshedSession.snapshot, threadId, currentApp.id),
+            generation
+          });
+          return;
+        }
+
+        console.log(`Applied generated source to ${currentApp.name} (${currentApp.id}).`);
+        return;
+      }
+
+      const createdResponse = await sendCommand(serverUrl, {
+        command: "thread.app.create",
+        agentId: session.identity.id,
+        threadId,
+        name: asOptionalString(commandFlags.name) ?? "Untitled app",
+        description: asOptionalString(commandFlags.description) ?? "",
+        source: validatedSource.source,
+        value: validatedSource.value
+      });
+      const snapshot = requireSnapshot(createdResponse);
+      const previousAppIds = new Set(
+        (session.snapshot.appsByThread[threadId] ?? []).map((app) => app.id)
+      );
+      const createdApp =
+        (snapshot.appsByThread[threadId] ?? []).find((app) => !previousAppIds.has(app.id)) ??
+        null;
+
+      if (jsonOutput) {
+        printJson({
+          app: createdApp ? buildAppView(snapshot, threadId, createdApp) : null,
+          generation
+        });
+        return;
+      }
+
+      console.log(
+        createdApp
+          ? `Generated and created app ${createdApp.name} (${createdApp.id}).`
+          : "Generated source and created a new app."
+      );
+      return;
+    }
+
+    if (jsonOutput) {
+      printJson(generation);
+      return;
+    }
+
+    if (!generation.streamed) {
+      console.log(generation.source);
+    }
+    console.log(`\nGenerated app source with ${generation.model}.`);
+    return;
+  }
+
+  printHelp();
+  process.exitCode = 1;
+}
+
 async function handleSearchCommand(
   subcommand: string | undefined,
   commandFlags: ParsedFlags
@@ -718,6 +1046,115 @@ async function fetchJson<T>(
   return payload as T;
 }
 
+async function streamGeneratedAppSource(
+  baseUrl: string,
+  params: {
+    agentId: string;
+    threadId: string;
+    prompt: string;
+    name?: string;
+    description?: string;
+    currentSource?: string;
+  },
+  options: {
+    streamToStdout: boolean;
+  }
+): Promise<{
+  generatedAt: string;
+  model: string;
+  prompt: string;
+  source: string;
+  streamed: boolean;
+  threadId: string | null;
+}> {
+  type StreamedAppSourcePayload = {
+    generatedAt: string;
+    model: string;
+    prompt: string;
+    source: string;
+    threadId: string | null;
+  };
+
+  const response = await fetch(`${baseUrl}/ai/app-source/stream`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(params)
+  });
+
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as
+      | { error?: string }
+      | null;
+    throw new Error(payload?.error || "Unable to stream app source.");
+  }
+
+  if (!response.body) {
+    throw new Error("Streaming response body is unavailable.");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let streamed = false;
+  let finalPayload: StreamedAppSourcePayload | null = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+
+    while (true) {
+      const boundaryIndex = buffer.indexOf("\n\n");
+      if (boundaryIndex < 0) {
+        break;
+      }
+
+      const rawFrame = buffer.slice(0, boundaryIndex);
+      buffer = buffer.slice(boundaryIndex + 2);
+
+      const event = parseSseFrame(rawFrame);
+      if (!event.event || !event.data) {
+        continue;
+      }
+
+      if (event.event === "delta") {
+        const payload = JSON.parse(event.data) as { delta?: string };
+        if (payload.delta) {
+          streamed = true;
+          if (options.streamToStdout) {
+            process.stdout.write(payload.delta);
+          }
+        }
+        continue;
+      }
+
+      if (event.event === "done") {
+        finalPayload = JSON.parse(event.data) as StreamedAppSourcePayload;
+        continue;
+      }
+
+      if (event.event === "error") {
+        const payload = JSON.parse(event.data) as { error?: string };
+        throw new Error(payload.error || "Unable to stream app source.");
+      }
+    }
+
+    if (done) {
+      break;
+    }
+  }
+
+  if (!finalPayload) {
+    throw new Error("Streaming response ended before completion.");
+  }
+
+  return {
+    ...finalPayload,
+    streamed
+  };
+}
+
 async function searchChat(
   baseUrl: string,
   params: {
@@ -920,6 +1357,64 @@ function printSnapshotDiff(
     }
   }
 
+  for (const thread of nextSnapshot.threads) {
+    if (focusThreadId && thread.id !== focusThreadId) {
+      continue;
+    }
+
+    const threadLabel = getThreadLabel(thread, nextSnapshot, selfId);
+    const previousApps = new Map(
+      (previousSnapshot.appsByThread[thread.id] ?? []).map((app) => [app.id, app] as const)
+    );
+    const nextApps = new Map(
+      (nextSnapshot.appsByThread[thread.id] ?? []).map((app) => [app.id, app] as const)
+    );
+
+    for (const app of nextApps.values()) {
+      const previousApp = previousApps.get(app.id);
+
+      if (!previousApp) {
+        console.log(
+          `[${app.updatedAt}] ${threadLabel} :: app created: ${app.name} (${app.id}) by ${getAuthorName(
+            nextSnapshot,
+            app.updatedBy
+          )}`
+        );
+        continue;
+      }
+
+      const changeKinds: string[] = [];
+      if (
+        previousApp.name !== app.name ||
+        previousApp.description !== app.description
+      ) {
+        changeKinds.push("meta");
+      }
+      if (previousApp.savedSource !== app.savedSource) {
+        changeKinds.push("source");
+      }
+      if (previousApp.document !== app.document) {
+        changeKinds.push(previousApp.savedSource !== app.savedSource ? "state" : "value");
+      }
+
+      if (changeKinds.length) {
+        console.log(
+          `[${app.updatedAt}] ${threadLabel} :: app updated (${changeKinds.join(
+            ", "
+          )}): ${app.name} (${app.id}) by ${getAuthorName(nextSnapshot, app.updatedBy)}`
+        );
+      }
+    }
+
+    for (const app of previousApps.values()) {
+      if (!nextApps.has(app.id)) {
+        console.log(
+          `[${nextSnapshot.serverTime}] ${threadLabel} :: app deleted: ${app.name} (${app.id})`
+        );
+      }
+    }
+  }
+
   const previousMessages = new Map<string, ChatMessage>();
   for (const messages of Object.values(previousSnapshot.messagesByThread)) {
     for (const message of messages) {
@@ -949,6 +1444,18 @@ function printSnapshotDiff(
       }
 
       printReactionDiff(previousMessage, message, nextSnapshot, threadLabel);
+    }
+
+    const nextMessageIds = new Set(threadMessages.map((message) => message.id));
+    const previousThreadMessages = previousSnapshot.messagesByThread[thread.id] ?? [];
+    for (const message of previousThreadMessages) {
+      if (!nextMessageIds.has(message.id)) {
+        console.log(
+          `[${nextSnapshot.serverTime}] ${threadLabel} :: message deleted: ${serializeMessage(
+            message
+          )} (${message.id})`
+        );
+      }
     }
   }
 }
@@ -1073,6 +1580,7 @@ function printThreadDetail(
       )
       .join(", ")}`
   );
+  console.log(`apps: ${threadView.apps.length}`);
   console.log(`messages: ${threadView.messages.length}`);
   if (threadView.summary) {
     console.log(
@@ -1080,6 +1588,19 @@ function printThreadDetail(
     );
   } else {
     console.log("summary:  (not generated yet)");
+  }
+
+  if (threadView.apps.length) {
+    console.log("");
+    console.log("apps:");
+    for (const app of threadView.apps) {
+      console.log(`- ${app.name} (${app.id})`);
+      console.log(`  updated: ${app.updatedAt} by ${app.updatedBy.username}`);
+      console.log(`  kind: ${app.sourceMode} | value: ${app.valueSummary}`);
+      if (app.description) {
+        console.log(`  ${app.description}`);
+      }
+    }
   }
 
   if (!threadView.messages.length) {
@@ -1220,6 +1741,7 @@ function buildThreadView(
   selfId: string
 ) {
   const messages = snapshot.messagesByThread[thread.id] ?? [];
+  const apps = snapshot.appsByThread[thread.id] ?? [];
 
   return {
     id: thread.id,
@@ -1233,7 +1755,50 @@ function buildThreadView(
     participants: thread.participantIds.map((participantId) =>
       buildUserRef(snapshot, participantId)
     ),
+    apps: apps.map((app) => buildAppView(snapshot, thread.id, app)),
     messages: messages.map((message) => buildMessageView(snapshot, message))
+  };
+}
+
+function buildAppsView(snapshot: ClientSnapshot, threadId: string) {
+  getThreadOrThrow(snapshot, threadId);
+  return (snapshot.appsByThread[threadId] ?? []).map((app) =>
+    buildAppView(snapshot, threadId, app)
+  );
+}
+
+function buildAppViewOrThrow(
+  snapshot: ClientSnapshot,
+  threadId: string,
+  appId: string
+) {
+  const app = getThreadAppOrThrow(snapshot, threadId, appId);
+  return buildAppView(snapshot, threadId, app);
+}
+
+function buildAppView(
+  snapshot: ClientSnapshot,
+  threadId: string,
+  app: ThreadAppState
+) {
+  const valueResult = decodeThreadAppValue(app.document);
+  const sourceResult = tryValidateAppSource(app.savedSource);
+
+  return {
+    id: app.id,
+    threadId,
+    name: app.name,
+    description: app.description,
+    updatedAt: app.updatedAt,
+    updatedBy: buildUserRef(snapshot, app.updatedBy),
+    savedSource: app.savedSource,
+    sourceMode: sourceResult?.mode ?? "unknown",
+    sourceValid: Boolean(sourceResult),
+    value: valueResult.value,
+    valueError: valueResult.error,
+    valueSummary: valueResult.value
+      ? summarizeAppValue(valueResult.value)
+      : "unavailable"
   };
 }
 
@@ -1270,6 +1835,20 @@ function buildUserRef(snapshot: ClientSnapshot, agentId: string) {
     username: user?.username ?? agentId,
     kind: user?.kind ?? "user"
   };
+}
+
+function getThreadAppOrThrow(
+  snapshot: ClientSnapshot,
+  threadId: string,
+  appId: string
+): ThreadAppState {
+  getThreadOrThrow(snapshot, threadId);
+  const app = (snapshot.appsByThread[threadId] ?? []).find((entry) => entry.id === appId);
+  if (!app) {
+    throw new Error(`App not found: ${appId}`);
+  }
+
+  return app;
 }
 
 function getThreadOrThrow(
@@ -1316,6 +1895,49 @@ function formatUserName(user: Pick<UserProfile, "username" | "kind">): string {
 
 function serializeMessage(message: ChatMessage): string {
   return extractMessageText(message);
+}
+
+function printApps(apps: ReturnType<typeof buildAppsView>) {
+  if (!apps.length) {
+    console.log("No apps.");
+    return;
+  }
+
+  for (const app of apps) {
+    console.log(`- ${app.name} (${app.id})`);
+    console.log(`  updated: ${app.updatedAt} by ${app.updatedBy.username}`);
+    console.log(`  kind: ${app.sourceMode} | value: ${app.valueSummary}`);
+    if (app.description) {
+      console.log(`  ${app.description}`);
+    }
+  }
+}
+
+function printAppDetail(app: ReturnType<typeof buildAppView>) {
+  console.log(`app:         ${app.name}`);
+  console.log(`id:          ${app.id}`);
+  console.log(`thread:      ${app.threadId}`);
+  console.log(`updated:     ${app.updatedAt}`);
+  console.log(
+    `updated by:  ${app.updatedBy.username} [${app.updatedBy.kind}] (${app.updatedBy.id})`
+  );
+  console.log(`source mode: ${app.sourceMode}`);
+  console.log(`value:       ${app.valueSummary}`);
+  if (app.description) {
+    console.log(`description: ${app.description}`);
+  }
+
+  if (app.valueError) {
+    console.log(`value error: ${app.valueError}`);
+  } else if (app.value !== null) {
+    console.log("");
+    console.log("current value:");
+    console.log(JSON.stringify(app.value, null, 2));
+  }
+
+  console.log("");
+  console.log("saved source:");
+  console.log(app.savedSource);
 }
 
 function sameMembers(left: string[], right: string[]): boolean {
@@ -1386,6 +2008,194 @@ function parseCsv(value: string | boolean | undefined): string[] {
     .filter(Boolean);
 }
 
+function parseAppPath(source: string): AppPathSegment[] {
+  const trimmedSource = source.trim();
+  if (!trimmedSource) {
+    throw new Error("--path must not be empty.");
+  }
+
+  if (trimmedSource.startsWith("/")) {
+    return trimmedSource
+      .split("/")
+      .slice(1)
+      .filter(Boolean)
+      .map((segment) => decodePointerSegment(segment))
+      .map((segment) => (/^\d+$/.test(segment) ? Number(segment) : segment));
+  }
+
+  const segments: AppPathSegment[] = [];
+  const matcher = /([^[.\]]+)|\[(\d+)\]/g;
+
+  for (const match of trimmedSource.matchAll(matcher)) {
+    if (match[1]) {
+      segments.push(match[1]);
+      continue;
+    }
+
+    if (match[2]) {
+      segments.push(Number(match[2]));
+    }
+  }
+
+  if (!segments.length) {
+    throw new Error(`Unable to parse app path: ${source}`);
+  }
+
+  return segments;
+}
+
+function formatAppPath(path: AppPathSegment[]): string {
+  if (!path.length) {
+    return "/";
+  }
+
+  return path
+    .map((segment, index) =>
+      typeof segment === "number"
+        ? `[${segment}]`
+        : index === 0
+          ? segment
+          : `.${segment}`
+    )
+    .join("");
+}
+
+function parseAppValueFromFlags(commandFlags: ParsedFlags): AppJsonValue {
+  if (typeof commandFlags.value === "string") {
+    return commandFlags.value;
+  }
+
+  const rawJsonValue =
+    typeof commandFlags.valueJson === "string"
+      ? commandFlags.valueJson
+      : typeof commandFlags.jsonValue === "string"
+        ? commandFlags.jsonValue
+        : undefined;
+
+  if (rawJsonValue) {
+    const parsedValue = JSON5.parse(rawJsonValue) as unknown;
+    if (!isAppJsonValue(parsedValue)) {
+      throw new Error("--value-json must be a valid JSON value.");
+    }
+
+    return parsedValue;
+  }
+
+  throw new Error("Provide either --value for strings or --value-json for JSON/JSON5 values.");
+}
+
+async function resolveAppSource(commandFlags: ParsedFlags): Promise<string> {
+  const inlineSource = asOptionalString(commandFlags.source);
+  if (inlineSource) {
+    return inlineSource;
+  }
+
+  const sourceFile = asOptionalString(commandFlags.sourceFile);
+  if (sourceFile) {
+    return readFile(sourceFile, "utf8");
+  }
+
+  return DEFAULT_APP_SOURCE;
+}
+
+function validateAppSource(source: string): {
+  mode: "legacy" | "spec";
+  source: string;
+  value: AppJsonValue;
+} {
+  const parsedValue = JSON5.parse(source) as unknown;
+
+  if (!isAppJsonValue(parsedValue)) {
+    throw new Error(
+      "Only JSON-compatible values are supported in app source: strings, finite numbers, booleans, null, arrays, and objects."
+    );
+  }
+
+  if (!looksLikeJsonRenderSpec(parsedValue)) {
+    return {
+      mode: "legacy",
+      source,
+      value: parsedValue
+    };
+  }
+
+  const validation = validateJsonRenderSpecShape(parsedValue);
+  if (!validation.valid) {
+    throw new Error(validation.issues.join(" "));
+  }
+
+  const stateValue =
+    typeof parsedValue === "object" && parsedValue !== null && "state" in parsedValue
+      ? parsedValue.state
+      : undefined;
+
+  if (
+    stateValue !== undefined &&
+    (typeof stateValue !== "object" || stateValue === null || Array.isArray(stateValue))
+  ) {
+    throw new Error('Spec field "state" must be an object when present.');
+  }
+
+  return {
+    mode: "spec",
+    source,
+    value: (stateValue as AppJsonValue | undefined) ?? {}
+  };
+}
+
+function tryValidateAppSource(source: string): {
+  mode: "legacy" | "spec";
+  source: string;
+  value: AppJsonValue;
+} | null {
+  try {
+    return validateAppSource(source);
+  } catch {
+    return null;
+  }
+}
+
+function decodeThreadAppValue(encodedDocument: string): {
+  error: string | null;
+  value: AppJsonValue | null;
+} {
+  try {
+    const document = Automerge.load<CliThreadAppDocument>(
+      Uint8Array.from(Buffer.from(encodedDocument, "base64"))
+    );
+    return {
+      error: null,
+      value: document.value
+    };
+  } catch (error) {
+    return {
+      error: error instanceof Error ? error.message : "Unable to decode app state.",
+      value: null
+    };
+  }
+}
+
+function summarizeAppValue(value: AppJsonValue): string {
+  if (Array.isArray(value)) {
+    return `list (${value.length})`;
+  }
+
+  if (value && typeof value === "object") {
+    const keys = Object.keys(value);
+    return keys.length ? `object (${keys.length} keys)` : "object (empty)";
+  }
+
+  if (value === null) {
+    return "null";
+  }
+
+  return typeof value;
+}
+
+function decodePointerSegment(segment: string): string {
+  return decodeURIComponent(segment.replace(/~1/g, "/").replace(/~0/g, "~"));
+}
+
 function parsePositiveInteger(
   value: string | boolean | undefined,
   fallback: number
@@ -1452,6 +2262,8 @@ Read:
   social-cli friends list [--json]
   social-cli threads list [--json]
   social-cli threads show --thread <thread-id> [--json]
+  social-cli apps list --thread <thread-id> [--json]
+  social-cli apps show --thread <thread-id> --app <app-id> [--json]
   social-cli message list --thread <thread-id> [--json]
   social-cli search chat --thread <thread-id> --query "<search text>" [--limit 10] [--json]
   social-cli watch [--thread <thread-id>] [--json]
@@ -1467,6 +2279,13 @@ Write:
   social-cli threads delete --thread <thread-id> [--json]
   social-cli threads participants add --thread <thread-id> --participants id1,id2 [--json]
   social-cli threads participants remove --thread <thread-id> --participants id1,id2 [--json]
+  social-cli apps create --thread <thread-id> [--name "App"] [--description "Desc"] [--source '{"root":"..."}' | --source-file ./app.json5] [--json]
+  social-cli apps delete --thread <thread-id> --app <app-id> [--json]
+  social-cli apps meta --thread <thread-id> --app <app-id> [--name "App"] [--description "Desc"] [--json]
+  social-cli apps save --thread <thread-id> --app <app-id> [--source '{"root":"..."}' | --source-file ./app.json5] [--json]
+  social-cli apps set --thread <thread-id> --app <app-id> --path form.todos[0].done --value-json true [--json]
+  social-cli apps share --thread <thread-id> --app <app-id> [--json]
+  social-cli apps generate --thread <thread-id> --prompt "build me a todo app" [--app <app-id>] [--apply] [--name "App"] [--description "Desc"] [--json]
   social-cli message text --thread <thread-id> --text "hello world" [--json]
   social-cli message send --thread <thread-id> --type custom.event --json-payload '{"foo":"bar"}' [--json]
   social-cli react --thread <thread-id> --message <message-id> --emoji 👍 [--json]
@@ -1474,6 +2293,7 @@ Write:
 Notes:
   snapshot prints the same visible snapshot shape the frontend receives.
   message send also accepts the legacy payload form: --json '{"foo":"bar"}'
+  apps set accepts JSON Pointer paths like /form/todos/0/done and dot paths like form.todos[0].done.
   search chat ranks exact phrase matches first, then partial/token hits, then semantic matches.
   ai commands embeds the CLI command catalog and suggests the best-fit commands for a goal.
   watch --json emits one raw snapshot JSON object per line.

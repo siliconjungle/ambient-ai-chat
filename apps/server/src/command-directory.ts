@@ -25,6 +25,11 @@ export const commandCategories: CliCommandCategory[] = [
     description: "Read, send, react to, and monitor thread activity."
   },
   {
+    id: "apps",
+    label: "Apps",
+    description: "Create, inspect, generate, share, and mutate collaborative apps."
+  },
+  {
     id: "search",
     label: "Search",
     description: "Run layered keyword and semantic search inside a chat."
@@ -138,6 +143,76 @@ export const commandDefinitions: CliCommandDefinition[] = [
       "social-cli react --thread <thread-id> --message <message-id> --emoji 👍"
     ],
     intents: ["react to message", "emoji reaction", "toggle reaction"]
+  },
+  {
+    id: "apps-list-show",
+    categoryId: "apps",
+    title: "Inspect apps",
+    usage:
+      "social-cli apps list --thread <thread-id> [--json] | social-cli apps show --thread <thread-id> --app <app-id> [--json]",
+    summary:
+      "Lists apps in a chat or shows one app's source, value, and metadata.",
+    examples: [
+      "social-cli apps list --thread <thread-id>",
+      "social-cli apps show --thread <thread-id> --app <app-id>"
+    ],
+    intents: ["list apps", "show app", "inspect app"]
+  },
+  {
+    id: "apps-create-delete",
+    categoryId: "apps",
+    title: "Create or delete an app",
+    usage:
+      "social-cli apps create --thread <thread-id> [--name \"App\"] [--description \"Desc\"] [--source '{...}' | --source-file ./app.json5] [--json] | social-cli apps delete --thread <thread-id> --app <app-id> [--json]",
+    summary:
+      "Creates a collaborative app from source or deletes an existing one.",
+    examples: [
+      "social-cli apps create --thread <thread-id> --name \"Todo\" --source-file ./todo.json5",
+      "social-cli apps delete --thread <thread-id> --app <app-id>"
+    ],
+    intents: ["create app", "new app", "delete app"]
+  },
+  {
+    id: "apps-update",
+    categoryId: "apps",
+    title: "Update app metadata or source",
+    usage:
+      "social-cli apps meta --thread <thread-id> --app <app-id> [--name \"App\"] [--description \"Desc\"] [--json] | social-cli apps save --thread <thread-id> --app <app-id> [--source '{...}' | --source-file ./app.json5] [--json]",
+    summary:
+      "Renames an app, changes its description, or saves a new source definition.",
+    examples: [
+      "social-cli apps meta --thread <thread-id> --app <app-id> --name \"Planning board\"",
+      "social-cli apps save --thread <thread-id> --app <app-id> --source-file ./planning-board.json5"
+    ],
+    intents: ["rename app", "update app source", "save app"]
+  },
+  {
+    id: "apps-set-share",
+    categoryId: "apps",
+    title: "Update app values or share an app",
+    usage:
+      "social-cli apps set --thread <thread-id> --app <app-id> --path form.todos[0].done --value-json true [--json] | social-cli apps share --thread <thread-id> --app <app-id> [--json]",
+    summary:
+      "Mutates app state at a path or posts an app embed into the thread as a message.",
+    examples: [
+      "social-cli apps set --thread <thread-id> --app <app-id> --path form.name --value \"Alex\"",
+      "social-cli apps share --thread <thread-id> --app <app-id>"
+    ],
+    intents: ["update app field", "change app value", "share app in chat"]
+  },
+  {
+    id: "apps-generate",
+    categoryId: "apps",
+    title: "Generate an app with AI",
+    usage:
+      "social-cli apps generate --thread <thread-id> --prompt \"<goal>\" [--app <app-id>] [--apply] [--name \"App\"] [--description \"Desc\"] [--json]",
+    summary:
+      "Streams generated app source from AI and can optionally apply it to a new or existing collaborative app.",
+    examples: [
+      "social-cli apps generate --thread <thread-id> --prompt \"Build a simple project tracker\"",
+      "social-cli apps generate --thread <thread-id> --app <app-id> --apply --prompt \"Turn this into a kanban board\""
+    ],
+    intents: ["generate app", "create app with ai", "update app with ai"]
   },
   {
     id: "watch",
