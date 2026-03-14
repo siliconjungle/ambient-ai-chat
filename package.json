@@ -1,0 +1,17 @@
+{
+  "name": "social-platform",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,web -c cyan,magenta \"npm run dev -w @social/server\" \"npm run dev -w @social/web\"",
+    "build": "npm run build -w @social/server && npm run build -w @social/web && npm run build -w @social/cli",
+    "typecheck": "npm run typecheck -w @social/shared && npm run typecheck -w @social/server && npm run typecheck -w @social/web && npm run typecheck -w @social/cli"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
