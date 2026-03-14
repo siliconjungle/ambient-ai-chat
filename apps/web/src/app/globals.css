@@ -1203,12 +1203,46 @@ textarea::placeholder {
   display: inline-flex;
   flex-shrink: 0;
   overflow: hidden;
+  isolation: isolate;
   border-radius: var(--radius-full);
   background-color: #101215;
-  box-shadow: var(--shadow-sm);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.08),
+    inset 0 0.5rem 0.8rem rgba(255, 255, 255, 0.08),
+    inset 0 -0.9rem 1.2rem rgba(0, 0, 0, 0.26),
+    0 10px 24px rgba(0, 0, 0, 0.26);
+}
+
+.avatar::before,
+.avatar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.avatar::before {
+  background:
+    radial-gradient(circle at 28% 22%, rgba(255, 255, 255, 0.34) 0%, rgba(255, 255, 255, 0.14) 14%, transparent 36%),
+    radial-gradient(circle at 70% 78%, rgba(255, 255, 255, 0.1) 0%, transparent 42%);
+  mix-blend-mode: screen;
+  opacity: 0.88;
+}
+
+.avatar::after {
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.14) 0%,
+    rgba(255, 255, 255, 0.03) 34%,
+    rgba(0, 0, 0, 0.18) 100%
+  );
 }
 
 .avatar-image {
+  position: relative;
+  z-index: 1;
   width: 100%;
   height: 100%;
   display: block;

@@ -1806,8 +1806,8 @@ function getUserNameStyle(
 
 function getAvatarFallbackStyle(avatar: ProceduralAvatar): CSSProperties {
   return {
-    backgroundColor: "rgba(14, 16, 20, 0.96)",
-    backgroundImage: `radial-gradient(circle at 22% 24%, ${avatar.highlight} 0%, ${avatar.highlight} 14%, transparent 40%), linear-gradient(145deg, ${avatar.base} 0%, ${avatar.accent} 68%, ${avatar.highlight} 100%)`
+    backgroundColor: "rgba(8, 10, 14, 0.94)",
+    backgroundImage: `radial-gradient(circle at 28% 24%, rgba(255, 255, 255, 0.42) 0%, transparent 18%), radial-gradient(circle at 34% 32%, ${avatar.highlight} 0%, ${avatar.highlight} 16%, transparent 42%), radial-gradient(circle at 70% 76%, ${avatar.accent} 0%, transparent 54%), linear-gradient(150deg, ${avatar.base} 0%, ${avatar.accent} 58%, ${avatar.highlight} 100%)`
   };
 }
 

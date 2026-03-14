@@ -122,38 +122,62 @@ function createAvatarRenderer(): AvatarRenderer | null {
     ) / sum;
   }
 
+  mat2 rotate2d(float angle) {
+    float s = sin(angle);
+    float c = cos(angle);
+    return mat2(c, -s, s, c);
+  }
+
   void main() {
     vec2 uv = v_uv;
-    vec2 p = uv;
+    vec2 centered = uv * 2.0 - 1.0;
+    float radius = length(centered);
+    float orb = 1.0 - smoothstep(0.86, 1.0, radius);
 
-    float field = noise(uv * (5.0 + u_variant * 0.55) + u_seed * 0.013);
-    float drift = noise((uv.yx + vec2(1.7, -0.6)) * (7.2 + u_variant) - u_seed * 0.009);
-    float waveX = sin((uv.y * 5.6 + uv.x * 2.4) + u_seed * 0.021);
-    float waveY = cos((uv.x * 6.1 - uv.y * 2.1) - u_seed * 0.019);
+    if (orb <= 0.0) {
+      outColor = vec4(0.0);
+      return;
+    }
 
-    p += vec2(
-      (field - 0.5) * 0.14 + waveX * 0.028,
-      (drift - 0.5) * 0.14 + waveY * 0.028
+    float z = sqrt(max(0.0, 1.0 - radius * radius));
+    vec3 normal = normalize(vec3(centered * vec2(1.04, 0.98), z));
+    float angle = atan(centered.y, centered.x);
+    float seedPhase = u_seed * 0.013 + u_variant * 0.37;
+
+    vec2 flowUvA = rotate2d(0.45 + u_variant * 0.08) * centered * 2.6;
+    vec2 flowUvB = rotate2d(-0.72 - u_variant * 0.05) * centered * 3.4;
+    float flowA = noise(flowUvA + vec2(seedPhase, -seedPhase * 0.7));
+    float flowB = noise(flowUvB + vec2(-seedPhase * 0.6, seedPhase * 0.9));
+    float wave = 0.5 + 0.5 * sin(angle * (5.0 + u_variant * 0.45) + flowA * 4.8 + radius * 8.0 + seedPhase * 11.0);
+    float ripple = 0.5 + 0.5 * cos((flowB * 3.4 + normal.y * 2.1 - normal.x * 1.6) * 3.2 + seedPhase * 7.0);
+
+    vec2 meshUv = uv + normal.xy * 0.11;
+    vec3 baseColor = gradientMesh(meshUv);
+    vec3 iridescence = mix(
+      mix(u_colorA, u_colorB, wave),
+      mix(u_colorC, u_colorD, ripple),
+      0.56
     );
+    vec3 color = mix(baseColor, iridescence, 0.52);
 
-    vec3 color = gradientMesh(p);
+    float coreGlow = pow(max(normal.z, 0.0), 1.8);
+    float fresnel = pow(1.0 - max(normal.z, 0.0), 2.7);
+    float highlight = pow(max(dot(normal, normalize(vec3(-0.58, 0.64, 1.0))), 0.0), 24.0);
+    float secondaryHighlight = pow(max(dot(normal, normalize(vec3(0.46, -0.22, 0.95))), 0.0), 12.0);
 
-    float ribbon = 0.5 + 0.5 * sin((p.x * 4.7 + p.y * 3.3 + u_seed * 0.012) * (2.0 + u_variant * 0.25));
-    color = mix(color, mix(u_colorB, u_colorC, ribbon), 0.24);
+    color *= 0.62 + coreGlow * 0.92;
+    color += mix(u_colorC, vec3(1.0), 0.45) * highlight * 0.7;
+    color += mix(u_colorB, vec3(1.0), 0.28) * secondaryHighlight * 0.22;
+    color += mix(u_colorD, u_colorB, 0.55) * fresnel * 0.48;
 
-    float bloom = 1.0 - smoothstep(0.14, 0.68, distance(p, mix(u_point0, u_point2, 0.5)));
-    color += bloom * 0.16 * mix(u_colorC, u_colorB, 0.45);
+    float innerFog = 1.0 - smoothstep(0.0, 0.78, radius);
+    color += innerFog * 0.1 * mix(u_colorA, u_colorC, 0.5);
 
-    float edgeLight = 1.0 - smoothstep(0.18, 0.78, distance(p, mix(u_point1, u_point3, 0.5)));
-    color += edgeLight * 0.08 * u_colorD;
+    float grain = hash(gl_FragCoord.xy + u_seed * 41.0) - 0.5;
+    color += grain * 0.035;
 
-    float grain = hash(gl_FragCoord.xy + u_seed * 37.0) - 0.5;
-    color += grain * 0.055;
-
-    float vignette = smoothstep(0.18, 0.92, 1.0 - length((uv - 0.5) * vec2(1.14, 1.04)));
-    color = mix(vec3(0.065, 0.058, 0.072), color, vignette);
-
-    outColor = vec4(clamp(color, 0.0, 1.0), 1.0);
+    color = mix(vec3(0.045, 0.048, 0.06), color, orb);
+    outColor = vec4(clamp(color, 0.0, 1.0), orb);
   }`;
 
   const program = createProgram(gl, vertexShaderSource, fragmentShaderSource);
