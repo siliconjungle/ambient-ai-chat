@@ -1,0 +1,260 @@
+.workbench {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+  gap: 1.25rem;
+  align-items: start;
+}
+
+.workbenchCompact .editor {
+  min-height: 24rem;
+}
+
+.workbenchSingle {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.rightRail {
+  display: grid;
+  gap: 1.25rem;
+}
+
+.panel {
+  display: grid;
+  gap: 1rem;
+  padding: 1.1rem;
+  border: 1px solid var(--line);
+  border-radius: 1.4rem;
+  background:
+    linear-gradient(180deg, rgba(18, 20, 24, 0.96), rgba(13, 15, 18, 0.98)),
+    radial-gradient(circle at top left, rgba(255, 255, 255, 0.035), transparent 30%);
+  box-shadow: var(--shadow-lg);
+}
+
+.panelHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.panelEyebrow {
+  margin: 0;
+  font-size: 0.76rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.panelTitle {
+  margin: 0.25rem 0 0;
+  font-size: 1.05rem;
+}
+
+.panelCopy,
+.statusHint,
+.helperText {
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.statusOk,
+.statusError,
+.fieldType,
+.nullBadge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.9rem;
+  padding: 0 0.75rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.statusOk {
+  border: 1px solid rgba(143, 214, 171, 0.3);
+  background: rgba(143, 214, 171, 0.12);
+  color: var(--success);
+}
+
+.statusError {
+  border: 1px solid rgba(243, 154, 154, 0.32);
+  background: rgba(243, 154, 154, 0.12);
+  color: var(--danger);
+}
+
+.editor {
+  width: 100%;
+  min-height: 28rem;
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--line);
+  border-radius: 1.1rem;
+  background: rgba(8, 9, 11, 0.92);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  line-height: 1.65;
+  resize: vertical;
+  outline: none;
+}
+
+.editor:focus,
+.input:focus {
+  border-color: var(--line-strong);
+  box-shadow: var(--focus-ring);
+}
+
+.statusBlock {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.editorActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.errorText {
+  margin: 0;
+  color: var(--danger);
+  line-height: 1.5;
+}
+
+.formSurface {
+  display: grid;
+  gap: 1rem;
+}
+
+.objectRoot,
+.objectCard,
+.fieldCard {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.objectCard,
+.fieldCard {
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 1.1rem;
+  background: rgba(255, 255, 255, 0.028);
+}
+
+.objectRoot {
+  gap: 1rem;
+}
+
+.objectGrid {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.fieldMeta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+}
+
+.fieldLabel {
+  font-weight: 600;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.fieldType {
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-soft);
+}
+
+.controlStack {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.input {
+  width: 100%;
+  min-height: 3rem;
+  border: 1px solid var(--line);
+  border-radius: 0.95rem;
+  background: rgba(9, 10, 12, 0.94);
+  color: var(--text);
+  padding: 0 0.95rem;
+  outline: none;
+}
+
+.switch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.85rem;
+  min-height: 3.2rem;
+  width: fit-content;
+  padding: 0.35rem 1rem 0.35rem 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+}
+
+.switchActive {
+  border-color: rgba(143, 214, 171, 0.3);
+  background: rgba(143, 214, 171, 0.08);
+}
+
+.switchTrack {
+  position: relative;
+  width: 3.5rem;
+  height: 2rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  transition: background 180ms ease;
+}
+
+.switchActive .switchTrack {
+  background: rgba(143, 214, 171, 0.4);
+}
+
+.switchThumb {
+  position: absolute;
+  top: 0.2rem;
+  left: 0.22rem;
+  width: 1.6rem;
+  height: 1.6rem;
+  border-radius: 50%;
+  background: #f4efe6;
+  box-shadow: 0 0.4rem 1rem rgba(0, 0, 0, 0.35);
+  transition: transform 180ms ease;
+}
+
+.switchActive .switchThumb {
+  transform: translateX(1.45rem);
+}
+
+.switchLabel {
+  font-weight: 600;
+}
+
+.emptyState,
+.nullBadge {
+  border: 1px dashed var(--line);
+  background: rgba(255, 255, 255, 0.028);
+  color: var(--text-muted);
+}
+
+@media (max-width: 960px) {
+  .workbench {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .editor {
+    min-height: 22rem;
+  }
+}

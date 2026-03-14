@@ -3,8 +3,10 @@ import type { ChatCommand, ThreadSearchResponse } from "@social/shared";
 export const chatServerUrl =
   process.env.NEXT_PUBLIC_CHAT_SERVER_URL ?? "http://localhost:4000";
 
-export async function sendCommand(command: ChatCommand): Promise<void> {
-  await fetchJson(`${chatServerUrl}/commands`, {
+export async function sendCommand<T = { ok: boolean }>(
+  command: ChatCommand
+): Promise<T> {
+  return fetchJson<T>(`${chatServerUrl}/commands`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json"

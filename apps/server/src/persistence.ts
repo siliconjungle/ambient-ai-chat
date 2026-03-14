@@ -1,7 +1,12 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
-import type { ChatMessage, ChatThread, UserProfile } from "@social/shared";
+import type {
+  ChatMessage,
+  ChatThread,
+  ThreadAppState,
+  UserProfile
+} from "@social/shared";
 
 import {
   createEmptyState,
@@ -10,7 +15,7 @@ import {
 } from "./state.js";
 
 interface PersistedStateFile {
-  version: 1;
+  version: 1 | 2;
   savedAt: string;
   users: UserProfile[];
   friendships: Array<{
@@ -18,6 +23,10 @@ interface PersistedStateFile {
     friendIds: string[];
   }>;
   threads: ChatThread[];
+  appsByThread?: Array<{
+    threadId: string;
+    apps: ThreadAppState[];
+  }>;
   messagesByThread: Array<{
     threadId: string;
     messages: ChatMessage[];
@@ -40,7 +49,7 @@ export async function loadStateFromDisk(stateFile: string): Promise<StoreState> 
     }
 
     const parsed = JSON.parse(raw) as Partial<PersistedStateFile>;
-    if (parsed.version !== 1) {
+    if (parsed.version !== 1 && parsed.version !== 2) {
       throw new Error(
         `Unsupported state file version: ${String(parsed.version ?? "unknown")}`
       );
@@ -60,6 +69,18 @@ export async function loadStateFromDisk(stateFile: string): Promise<StoreState> 
 
     for (const thread of asArray<ChatThread>(parsed.threads)) {
       state.threads.set(thread.id, thread);
+    }
+
+    for (const entry of asArray<NonNullable<PersistedStateFile["appsByThread"]>[number]>(
+      parsed.appsByThread
+    )) {
+      state.appsByThread.set(
+        entry.threadId,
+        entry.apps.map((app) => ({
+          ...app,
+          description: typeof app.description === "string" ? app.description : ""
+        }))
+      );
     }
 
     for (const entry of asArray<PersistedStateFile["messagesByThread"][number]>(
@@ -101,7 +122,7 @@ export async function saveStateToDisk(
   await mkdir(dirname(stateFile), { recursive: true });
 
   const payload: PersistedStateFile = {
-    version: 1,
+    version: 2,
     savedAt: new Date().toISOString(),
     users: [...state.users.values()].sort((left, right) =>
       left.id.localeCompare(right.id)
@@ -115,6 +136,12 @@ export async function saveStateToDisk(
     threads: [...state.threads.values()].sort((left, right) =>
       left.id.localeCompare(right.id)
     ),
+    appsByThread: [...state.appsByThread.entries()]
+      .map(([threadId, apps]) => ({
+        threadId,
+        apps: [...apps].sort((left, right) => left.id.localeCompare(right.id))
+      }))
+      .sort((left, right) => left.threadId.localeCompare(right.threadId)),
     messagesByThread: [...state.messagesByThread.entries()]
       .map(([threadId, messages]) => ({
         threadId,

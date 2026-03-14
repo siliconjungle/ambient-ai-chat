@@ -58,11 +58,36 @@ export interface ChatThread {
   summary: AiSummary | null;
 }
 
+export type AppJsonPrimitive = string | number | boolean | null;
+export type AppJsonArray = AppJsonValue[];
+export type AppJsonObject = { [key: string]: AppJsonValue };
+export type AppJsonValue = AppJsonPrimitive | AppJsonArray | AppJsonObject;
+export type AppPathSegment = string | number;
+
+export interface ThreadAppTemplate {
+  id: string;
+  name: string;
+  description: string;
+  source: string;
+  value: AppJsonValue;
+}
+
+export interface ThreadAppState {
+  id: string;
+  name: string;
+  description: string;
+  savedSource: string;
+  document: string;
+  updatedAt: string;
+  updatedBy: string;
+}
+
 export interface ClientSnapshot {
   self: UserProfile | null;
   users: UserProfile[];
   friendIds: string[];
   threads: ChatThread[];
+  appsByThread: Record<string, ThreadAppState[]>;
   messagesByThread: Record<string, ChatMessage[]>;
   serverTime: string;
 }
@@ -209,7 +234,48 @@ export type ChatCommand =
       messageId: string;
       emoji: string;
       agentId: string;
+    }
+  | {
+      command: "thread.app.create";
+      agentId: string;
+      threadId: string;
+      name: string;
+      description: string;
+      source: string;
+      value: AppJsonValue;
+    }
+  | {
+      command: "thread.app.delete";
+      agentId: string;
+      threadId: string;
+      appId: string;
+    }
+  | {
+      command: "thread.app.meta.update";
+      agentId: string;
+      threadId: string;
+      appId: string;
+      name: string;
+      description: string;
+    }
+  | {
+      command: "thread.app.source.save";
+      agentId: string;
+      threadId: string;
+      appId: string;
+      source: string;
+      value: AppJsonValue;
+    }
+  | {
+      command: "thread.app.form.update";
+      agentId: string;
+      threadId: string;
+      appId: string;
+      path: AppPathSegment[];
+      value: AppJsonPrimitive;
     };
+
+export const defaultThreadAppTemplates: ThreadAppTemplate[] = [];
 
 export const descriptorOptions = [
   "Amber",
@@ -425,6 +491,30 @@ export function isRecord(
   value: unknown
 ): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function isAppJsonValue(value: unknown): value is AppJsonValue {
+  if (value === null) {
+    return true;
+  }
+
+  if (typeof value === "string" || typeof value === "boolean") {
+    return true;
+  }
+
+  if (typeof value === "number") {
+    return Number.isFinite(value);
+  }
+
+  if (Array.isArray(value)) {
+    return value.every((item) => isAppJsonValue(item));
+  }
+
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  return Object.values(value).every((item) => isAppJsonValue(item));
 }
 
 export function extractMessageText(

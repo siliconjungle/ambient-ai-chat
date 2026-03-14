@@ -13,25 +13,35 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import {
+  RiCheckLine,
   RiAddLine,
+  RiApps2Line,
   RiArrowLeftSLine,
   RiArrowDownSLine,
   RiArrowUpSLine,
   RiChat3Line,
   RiCloseLine,
+  RiDeleteBinLine,
   RiFileCopyLine,
   RiMenuLine,
+  RiPencilLine,
   RiSearchLine,
+  RiTeamLine,
   RiUserAddLine,
+  RiUser3Line,
   RiUserUnfollowLine
 } from "react-icons/ri";
 
 import {
   type AgentKind,
+  type AppJsonPrimitive,
+  type AppJsonValue,
+  type AppPathSegment,
   type ChatMessage,
   type ChatThread,
   type ClientSnapshot,
   type ProceduralAvatar,
+  type ThreadAppState,
   type ThreadSearchResult,
   type UserProfile,
   createProceduralAvatar,
@@ -45,13 +55,22 @@ import {
 } from "../lib/chat-api";
 import { getProceduralAvatarDataUrl } from "../lib/avatar-renderer";
 import {
+  DEFAULT_JSON5_SOURCE,
+  Json5Workbench,
+  JsonValueWorkbench,
+  summarizeJson5Shape,
+  validateJson5Source
+} from "./json5-form-editor";
+import {
   getOrCreateProfile,
   type StoredProfile
 } from "../lib/profile-store";
+import { readThreadAppValue } from "../lib/thread-apps";
 
 const reactionChoices = ["👍", "🔥", "❤️", "😂", "👀"];
 
-type SidebarTab = "threads" | "friends";
+type SidebarTab = "threads" | "people" | "profile";
+type ConversationTab = "feed" | "apps";
 type ConnectionState = "connecting" | "online" | "offline";
 type AvatarSize = "xs" | "sm" | "md" | "lg";
 type UserHoverPopoverPosition = {
@@ -59,6 +78,7 @@ type UserHoverPopoverPosition = {
   left: number;
   placement: "top" | "bottom";
 };
+type AppDetailMode = "view" | "edit";
 
 export function ChatApp() {
   const [profile, setProfile] = useState<StoredProfile | null>(null);
@@ -66,13 +86,17 @@ export function ChatApp() {
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("threads");
+  const [createThreadModalOpen, setCreateThreadModalOpen] = useState(false);
   const [createTitle, setCreateTitle] = useState("");
   const [selectedFriends, setSelectedFriends] = useState<string[]>([]);
   const [friendSearch, setFriendSearch] = useState("");
   const [participantModalOpen, setParticipantModalOpen] = useState(false);
+  const [deleteThreadModalOpen, setDeleteThreadModalOpen] = useState(false);
+  const [deleteThreadPending, setDeleteThreadPending] = useState(false);
   const [participantsToAdd, setParticipantsToAdd] = useState<string[]>([]);
   const [draft, setDraft] = useState("");
   const [reactionTargetId, setReactionTargetId] = useState<string | null>(null);
+  const [conversationTab, setConversationTab] = useState<ConversationTab>("feed");
   const [connectionState, setConnectionState] =
     useState<ConnectionState>("connecting");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -84,6 +108,7 @@ export function ChatApp() {
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [selectedAppId, setSelectedAppId] = useState<string | null>(null);
 
   const deferredFriendSearch = useDeferredValue(friendSearch);
   const deferredMessageSearchQuery = useDeferredValue(messageSearchQuery);
@@ -100,6 +125,11 @@ export function ChatApp() {
   const selectedMessages = selectedThreadId
     ? snapshot?.messagesByThread[selectedThreadId] ?? []
     : [];
+  const activeApps = selectedThreadId
+    ? snapshot?.appsByThread[selectedThreadId] ?? []
+    : [];
+  const selectedApp = activeApps.find((app) => app.id === selectedAppId) ?? null;
+  const selectedAppState = selectedApp ? decodeThreadAppSnapshot(selectedApp) : null;
   const usersById = new Map(
     snapshot?.users.map((user) => [user.id, user]) ?? []
   );
@@ -237,14 +267,26 @@ export function ChatApp() {
 
   useEffect(() => {
     setParticipantModalOpen(false);
+    setDeleteThreadModalOpen(false);
+    setDeleteThreadPending(false);
     setParticipantsToAdd([]);
     setReactionTargetId(null);
+    setConversationTab("feed");
+    setSelectedAppId(null);
     setSearchOpen(false);
     setMessageSearchQuery("");
     setSearchResults([]);
     setActiveSearchIndex(0);
     setSearchError(null);
   }, [selectedThreadId]);
+
+  useEffect(() => {
+    if (conversationTab === "feed") {
+      return;
+    }
+
+    closeSearch();
+  }, [conversationTab]);
 
   useEffect(() => {
     if (!searchOpen) {
@@ -359,6 +401,10 @@ export function ChatApp() {
     );
   });
 
+  const availableFriendsForNewThread = (snapshot?.users ?? []).filter(
+    (user) => user.id !== profile?.id && friendIds.has(user.id)
+  );
+
   const availableFriendsForSelectedThread = selectedThread
     ? (snapshot?.users ?? []).filter(
         (user) =>
@@ -370,6 +416,21 @@ export function ChatApp() {
 
   async function handleCreateThread() {
     await createThread(selectedFriends, createTitle);
+  }
+
+  function resetCreateThreadDraft() {
+    setCreateTitle("");
+    setSelectedFriends([]);
+  }
+
+  function openCreateThreadModal() {
+    resetCreateThreadDraft();
+    setCreateThreadModalOpen(true);
+  }
+
+  function closeCreateThreadModal() {
+    setCreateThreadModalOpen(false);
+    resetCreateThreadDraft();
   }
 
   async function createThread(participantIds: string[], title: string) {
@@ -384,8 +445,8 @@ export function ChatApp() {
         title,
         participantIds
       });
-      setCreateTitle("");
-      setSelectedFriends([]);
+      setCreateThreadModalOpen(false);
+      resetCreateThreadDraft();
       setSidebarTab("threads");
       closeSidebarIfOverlay(setSidebarOpen);
     } catch (error) {
@@ -400,21 +461,21 @@ export function ChatApp() {
       return;
     }
 
-    if (!window.confirm("Delete this chat for everyone?")) {
-      return;
-    }
-
     try {
+      setDeleteThreadPending(true);
       await sendCommand({
         command: "thread.delete",
         agentId: profile.id,
         threadId
       });
+      setDeleteThreadModalOpen(false);
       setParticipantModalOpen(false);
     } catch (error) {
       setErrorMessage(
         error instanceof Error ? error.message : "Unable to delete thread."
       );
+    } finally {
+      setDeleteThreadPending(false);
     }
   }
 
@@ -608,6 +669,132 @@ export function ChatApp() {
     setSearchError(null);
   }
 
+  async function handleCreateApp() {
+    if (!selectedThreadId || !profile?.id) {
+      return;
+    }
+
+    const validation = validateJson5Source(DEFAULT_JSON5_SOURCE);
+    if (validation.error || validation.value === null) {
+      setErrorMessage(validation.error ?? "Invalid default app source.");
+      return;
+    }
+
+    try {
+      const response = await sendCommand<{ outcome?: { appId?: string } }>({
+        command: "thread.app.create",
+        agentId: profile.id,
+        threadId: selectedThreadId,
+        name: "Untitled app",
+        description: "",
+        source: DEFAULT_JSON5_SOURCE,
+        value: validation.value
+      });
+
+      setConversationTab("apps");
+      if (response.outcome?.appId) {
+        setSelectedAppId(response.outcome.appId);
+      }
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error ? error.message : "Unable to create app."
+      );
+    }
+  }
+
+  async function handleDeleteApp(appId: string) {
+    if (!selectedThreadId || !profile?.id) {
+      return;
+    }
+
+    try {
+      await sendCommand({
+        command: "thread.app.delete",
+        agentId: profile.id,
+        threadId: selectedThreadId,
+        appId
+      });
+
+      setSelectedAppId((current) => (current === appId ? null : current));
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error ? error.message : "Unable to delete app."
+      );
+    }
+  }
+
+  async function handleSaveApp(
+    appId: string,
+    nextValues: {
+      name: string;
+      description: string;
+      source: string;
+      value: AppJsonValue;
+    }
+  ) {
+    if (!selectedThreadId || !profile?.id) {
+      throw new Error("No active thread selected.");
+    }
+
+    const currentApp = activeApps.find((app) => app.id === appId);
+    if (!currentApp) {
+      throw new Error("App not found.");
+    }
+
+    const nextName = nextValues.name.trim() || "Untitled app";
+    const nextDescription = nextValues.description.trim();
+
+    if (
+      currentApp.name !== nextName ||
+      currentApp.description !== nextDescription
+    ) {
+      await sendCommand({
+        command: "thread.app.meta.update",
+        agentId: profile.id,
+        threadId: selectedThreadId,
+        appId,
+        name: nextName,
+        description: nextDescription
+      });
+    }
+
+    if (currentApp.savedSource !== nextValues.source) {
+      await sendCommand({
+        command: "thread.app.source.save",
+        agentId: profile.id,
+        threadId: selectedThreadId,
+        appId,
+        source: nextValues.source,
+        value: nextValues.value
+      });
+    }
+  }
+
+  async function handleUpdateAppField(
+    appId: string,
+    path: AppPathSegment[],
+    value: AppJsonPrimitive
+  ) {
+    if (!selectedThreadId || !profile?.id) {
+      return;
+    }
+
+    try {
+      await sendCommand({
+        command: "thread.app.form.update",
+        agentId: profile.id,
+        threadId: selectedThreadId,
+        appId,
+        path,
+        value
+      });
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error ? error.message : "Unable to update app field."
+      );
+    }
+  }
+
   return (
     <main className="chat-page">
       <section className={`shell ${sidebarOpen ? "shell-sidebar-open" : ""}`}>
@@ -622,7 +809,35 @@ export function ChatApp() {
 
         <aside className="sidebar">
           <div className="sidebar-header">
-            <h1>Chats</h1>
+            <div className="pill-tabs sidebar-tabs">
+              <button
+                aria-label="Threads"
+                className={sidebarTab === "threads" ? "tab-active" : ""}
+                onClick={() => setSidebarTab("threads")}
+                title="Threads"
+                type="button"
+              >
+                <RiChat3Line aria-hidden="true" />
+              </button>
+              <button
+                aria-label="People"
+                className={sidebarTab === "people" ? "tab-active" : ""}
+                onClick={() => setSidebarTab("people")}
+                title="People"
+                type="button"
+              >
+                <RiTeamLine aria-hidden="true" />
+              </button>
+              <button
+                aria-label="Profile"
+                className={sidebarTab === "profile" ? "tab-active" : ""}
+                onClick={() => setSidebarTab("profile")}
+                title="Profile"
+                type="button"
+              >
+                <RiUser3Line aria-hidden="true" />
+              </button>
+            </div>
             <button
               aria-label="Hide sidebar"
               className="ghost-button icon-button"
@@ -633,175 +848,64 @@ export function ChatApp() {
             </button>
           </div>
 
-          <div className="pill-tabs">
-            <button
-              className={sidebarTab === "threads" ? "tab-active" : ""}
-              onClick={() => setSidebarTab("threads")}
-              type="button"
-            >
-              Threads
-            </button>
-            <button
-              className={sidebarTab === "friends" ? "tab-active" : ""}
-              onClick={() => setSidebarTab("friends")}
-              type="button"
-            >
-              People
-            </button>
-          </div>
-
           {sidebarTab === "threads" ? (
             <div className="sidebar-section-stack">
-              <section className="panel create-chat-panel">
-                <div className="panel-header">
-                  <p className="panel-title">New chat</p>
-                </div>
-
-                <label className="field">
-                  <span>Title</span>
-                  <input
-                    onChange={(event) => setCreateTitle(event.target.value)}
-                    placeholder="Optional"
-                    value={createTitle}
-                  />
-                </label>
-
-                <div className="selection-list">
-                  {(snapshot?.users ?? [])
-                    .filter(
-                      (user) => user.id !== profile?.id && friendIds.has(user.id)
-                    )
-                    .map((user) => {
-                      const selected = selectedFriends.includes(user.id);
-                      return (
-                        <button
-                          className={`selection-chip ${selected ? "selection-chip-active" : ""}`}
-                          key={user.id}
-                          onClick={() =>
-                            setSelectedFriends((current) =>
-                              selected
-                                ? current.filter((id) => id !== user.id)
-                                : [...current, user.id]
-                            )
-                          }
-                          type="button"
-                        >
-                          <AvatarCircle size="xs" user={user} />
-                          <span
-                            className="selection-chip-name"
-                            style={getUserNameStyle(user)}
-                          >
-                            {user.username}
-                          </span>
-                        </button>
-                      );
-                    })}
-                </div>
-
-                <div className="create-chat-actions">
+              <section className="panel sidebar-action-panel">
+                <div className="sidebar-action-row">
                   <button
                     className="primary-button create-chat-button"
-                    disabled={selectedFriends.length === 0}
-                    onClick={() => void handleCreateThread()}
+                    onClick={openCreateThreadModal}
                     type="button"
                   >
-                    Create chat
+                    New chat
                   </button>
                 </div>
               </section>
 
-              <section className="panel panel-list">
-                <div className="panel-header">
-                  <p className="panel-title">Recent</p>
-                </div>
+              <div className="thread-list sidebar-thread-list">
+                {snapshot?.threads.length ? (
+                  snapshot.threads.map((thread) => {
+                    const active = thread.id === selectedThreadId;
+                    const latestMessage =
+                      snapshot.messagesByThread[thread.id]?.at(-1) ?? null;
+                    const threadParticipants = thread.participantIds.map(
+                      (participantId) => getDisplayUser(usersById, participantId)
+                    );
 
-                <div className="thread-list">
-                  {snapshot?.threads.length ? (
-                    snapshot.threads.map((thread) => {
-                      const active = thread.id === selectedThreadId;
-                      const latestMessage =
-                        snapshot.messagesByThread[thread.id]?.at(-1) ?? null;
-                      const threadParticipants = thread.participantIds.map(
-                        (participantId) => getDisplayUser(usersById, participantId)
-                      );
-
-                      return (
-                        <button
-                          className={`thread-card ${active ? "thread-card-active" : ""}`}
-                          key={thread.id}
-                          onClick={() => {
-                            setSelectedThreadId(thread.id);
-                            closeSidebarIfOverlay(setSidebarOpen);
-                          }}
-                          type="button"
-                        >
-                          <div className="thread-card-top">
-                            <span className="thread-card-title">
-                              {getThreadLabel(thread, usersById, profile?.id ?? "")}
-                            </span>
-                            <ThreadParticipantStrip participants={threadParticipants} />
-                          </div>
-                          <span className="thread-card-preview">
-                            {latestMessage
-                              ? getMessagePreview(latestMessage)
-                              : "No messages yet."}
+                    return (
+                      <button
+                        className={`thread-card ${active ? "thread-card-active" : ""}`}
+                        key={thread.id}
+                        onClick={() => {
+                          setSelectedThreadId(thread.id);
+                          closeSidebarIfOverlay(setSidebarOpen);
+                        }}
+                        type="button"
+                      >
+                        <div className="thread-card-top">
+                          <span className="thread-card-title">
+                            {getThreadLabel(thread, usersById, profile?.id ?? "")}
                           </span>
-                        </button>
-                      );
-                    })
-                  ) : (
-                    <div className="empty-state">Start with a friend and open a chat.</div>
-                  )}
-                </div>
-              </section>
-            </div>
-          ) : (
-            <div className="sidebar-section-stack">
-              <section className="profile-card">
-                <div className="profile-summary">
-                  {selfUser ? <AvatarCircle size="lg" user={selfUser} /> : null}
-
-                  <div className="profile-identity">
-                    <p className="profile-name" style={getUserNameStyle(selfUser)}>
-                      {profile?.username ?? "Loading..."}
-                    </p>
-                    <div className="id-row">
-                      <span className="id-pill mono" title={profile?.id ?? ""}>
-                        {formatCompactId(profile?.id ?? "...")}
-                      </span>
-                      <div className="copy-popover-wrap">
-                        <button
-                          aria-label="Copy your ID"
-                          className="ghost-button copy-id-button"
-                          disabled={!profile?.id}
-                          onClick={() =>
-                            void handleCopyId(
-                              profile?.id ?? "",
-                              "your ID",
-                              "profile-id"
-                            )
-                          }
-                          type="button"
-                        >
-                          <RiFileCopyLine aria-hidden="true" />
-                        </button>
-
-                        {copiedKey === "profile-id" ? (
-                          <span className="copy-popover" role="status">
-                            Copied
-                          </span>
-                        ) : null}
-                      </div>
-                    </div>
+                          <ThreadParticipantStrip participants={threadParticipants} />
+                        </div>
+                        <span className="thread-card-preview">
+                          {latestMessage
+                            ? getMessagePreview(latestMessage)
+                            : "No messages yet."}
+                        </span>
+                      </button>
+                    );
+                  })
+                ) : (
+                  <div className="empty-state">
+                    Use New chat to start a conversation.
                   </div>
-                </div>
-              </section>
-
-              <section className="panel directory-panel">
-                <div className="panel-header">
-                  <p className="panel-title">People</p>
-                </div>
-
+                )}
+              </div>
+            </div>
+          ) : sidebarTab === "people" ? (
+            <div className="sidebar-section-stack">
+              <div className="directory-panel">
                 <label className="field">
                   <span>Search</span>
                   <input
@@ -895,6 +999,48 @@ export function ChatApp() {
                     <div className="empty-state">No people match that search.</div>
                   ) : null}
                 </div>
+              </div>
+            </div>
+          ) : (
+            <div className="sidebar-section-stack">
+              <section className="profile-card">
+                <div className="profile-summary">
+                  {selfUser ? <AvatarCircle size="lg" user={selfUser} /> : null}
+
+                  <div className="profile-identity">
+                    <p className="profile-name" style={getUserNameStyle(selfUser)}>
+                      {profile?.username ?? "Loading..."}
+                    </p>
+                    <div className="id-row">
+                      <span className="id-pill mono" title={profile?.id ?? ""}>
+                        {formatCompactId(profile?.id ?? "...")}
+                      </span>
+                      <div className="copy-popover-wrap">
+                        <button
+                          aria-label="Copy your ID"
+                          className="ghost-button copy-id-button"
+                          disabled={!profile?.id}
+                          onClick={() =>
+                            void handleCopyId(
+                              profile?.id ?? "",
+                              "your ID",
+                              "profile-id"
+                            )
+                          }
+                          type="button"
+                        >
+                          <RiFileCopyLine aria-hidden="true" />
+                        </button>
+
+                        {copiedKey === "profile-id" ? (
+                          <span className="copy-popover" role="status">
+                            Copied
+                          </span>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </section>
             </div>
           )}
@@ -921,10 +1067,12 @@ export function ChatApp() {
             <>
               <header
                 className={`conversation-header ${
-                  selectedThread && searchOpen ? "conversation-header-search-open" : ""
+                  selectedThread && searchOpen && conversationTab === "feed"
+                    ? "conversation-header-search-open"
+                    : ""
                 }`}
               >
-                {selectedThread && searchOpen ? (
+                {selectedThread && searchOpen && conversationTab === "feed" ? (
                   <div className="conversation-search-shell">
                     <div className="conversation-search-top">
                       <button
@@ -1012,7 +1160,7 @@ export function ChatApp() {
                             ? `${selectedThreadParticipants.length} participant${
                                 selectedThreadParticipants.length === 1 ? "" : "s"
                               }`
-                            : "Open the sidebar to pick or create a chat."}
+                            : "Open the sidebar and start a new chat."}
                         </p>
                       </div>
                     </div>
@@ -1032,7 +1180,7 @@ export function ChatApp() {
                         {connectionState}
                       </span>
 
-                      {selectedThread ? (
+                      {selectedThread && conversationTab === "feed" ? (
                         <button
                           aria-label="Search this chat"
                           className="ghost-button icon-button search-toggle-button"
@@ -1046,20 +1194,47 @@ export function ChatApp() {
                       {selectedThread ? (
                         <button
                           className="ghost-button danger-button"
-                          onClick={() => void handleDeleteThread(selectedThread.id)}
+                          onClick={() => setDeleteThreadModalOpen(true)}
                           type="button"
                         >
                           Delete
                         </button>
+                      ) : null}
+
+                      {selectedThread ? (
+                        <div className="pill-tabs conversation-tabs">
+                          <button
+                            aria-label="Text feed"
+                            className={conversationTab === "feed" ? "tab-active" : ""}
+                            onClick={() => setConversationTab("feed")}
+                            title="Text feed"
+                            type="button"
+                          >
+                            <RiChat3Line aria-hidden="true" />
+                          </button>
+                          <button
+                            aria-label="Apps"
+                            className={conversationTab === "apps" ? "tab-active" : ""}
+                            onClick={() => setConversationTab("apps")}
+                            title="Apps"
+                            type="button"
+                          >
+                            <RiApps2Line aria-hidden="true" />
+                          </button>
+                        </div>
                       ) : null}
                     </div>
                   </>
                 )}
               </header>
 
-              <div className="conversation-body">
+              <div
+                className={`conversation-body ${
+                  conversationTab === "apps" ? "conversation-body-apps" : ""
+                }`}
+              >
                 {selectedThread ? (
-                  <>
+                  conversationTab === "feed" ? (
                     <div
                       className="message-scroller"
                       onScroll={handleScroll}
@@ -1162,17 +1337,30 @@ export function ChatApp() {
                         );
                       })}
                     </div>
-                  </>
+                  ) : (
+                    <AppsPane
+                      apps={activeApps}
+                      collaborativeValue={selectedAppState?.value ?? null}
+                      collaborativeValueError={selectedAppState?.error ?? null}
+                      onBack={() => setSelectedAppId(null)}
+                      onCreateApp={() => void handleCreateApp()}
+                      onDeleteApp={(appId) => void handleDeleteApp(appId)}
+                      onOpenApp={setSelectedAppId}
+                      onSaveApp={(appId, nextValues) => handleSaveApp(appId, nextValues)}
+                      onValueChange={handleUpdateAppField}
+                      selectedApp={selectedApp}
+                    />
+                  )
                 ) : (
                   <div className="blank-state">
                     <div className="blank-card">
                       <h3>No chat selected</h3>
-                      <p>Open the sidebar, pick people, and start talking.</p>
+                      <p>Open the sidebar and start a new chat.</p>
                     </div>
                   </div>
                 )}
 
-                {selectedThread && showJumpToLatest ? (
+                {selectedThread && conversationTab === "feed" && showJumpToLatest ? (
                   <button
                     className="jump-button"
                     onClick={() => scrollToLatest("smooth")}
@@ -1183,32 +1371,205 @@ export function ChatApp() {
                 ) : null}
               </div>
 
-              <footer className="composer">
-                {errorMessage ? <p className="error-banner">{errorMessage}</p> : null}
+              {conversationTab === "feed" ? (
+                <footer className="composer">
+                  {errorMessage ? <p className="error-banner">{errorMessage}</p> : null}
 
-                <div className="composer-shell">
-                  <textarea
-                    disabled={!selectedThread}
-                    onChange={(event) => setDraft(event.target.value)}
-                    onKeyDown={handleComposerKeyDown}
-                    placeholder="Send a message"
-                    rows={1}
-                    value={draft}
-                  />
-                  <button
-                    className="primary-button composer-send"
-                    disabled={!selectedThread || !draft.trim()}
-                    onClick={() => void handleSendMessage()}
-                    type="button"
-                  >
-                    Send
-                  </button>
-                </div>
-              </footer>
+                  <div className="composer-shell">
+                    <textarea
+                      disabled={!selectedThread}
+                      onChange={(event) => setDraft(event.target.value)}
+                      onKeyDown={handleComposerKeyDown}
+                      placeholder="Send a message"
+                      rows={1}
+                      value={draft}
+                    />
+                    <button
+                      className="primary-button composer-send"
+                      disabled={!selectedThread || !draft.trim()}
+                      onClick={() => void handleSendMessage()}
+                      type="button"
+                    >
+                      Send
+                    </button>
+                  </div>
+                </footer>
+              ) : null}
             </>
           )}
         </section>
       </section>
+
+      {createThreadModalOpen ? (
+        <div className="modal-layer">
+          <button
+            aria-label="Close new chat modal"
+            className="modal-scrim"
+            onClick={closeCreateThreadModal}
+            type="button"
+          />
+
+          <section
+            aria-modal="true"
+            className="modal-card"
+            role="dialog"
+          >
+            <div className="modal-header">
+              <div>
+                <h3>New chat</h3>
+                <p className="panel-copy">
+                  Pick one or more friends to start a conversation.
+                </p>
+              </div>
+
+              <button
+                className="ghost-button"
+                onClick={closeCreateThreadModal}
+                type="button"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="modal-body">
+              <label className="field modal-field">
+                <span>Title</span>
+                <input
+                  onChange={(event) => setCreateTitle(event.target.value)}
+                  placeholder="Optional"
+                  value={createTitle}
+                />
+              </label>
+
+              <section className="modal-section create-chat-modal-section">
+                <div className="panel-header">
+                  <div>
+                    <p className="panel-title">People</p>
+                    <p className="panel-copy">
+                      Only friends can be added here.
+                    </p>
+                  </div>
+                </div>
+
+                {availableFriendsForNewThread.length ? (
+                  <div className="selection-list">
+                    {availableFriendsForNewThread.map((user) => {
+                      const selected = selectedFriends.includes(user.id);
+
+                      return (
+                        <button
+                          className={`selection-chip ${selected ? "selection-chip-active" : ""}`}
+                          key={user.id}
+                          onClick={() =>
+                            setSelectedFriends((current) =>
+                              selected
+                                ? current.filter((id) => id !== user.id)
+                                : [...current, user.id]
+                            )
+                          }
+                          type="button"
+                        >
+                          <AvatarCircle size="xs" user={user} />
+                          <span
+                            className="selection-chip-name"
+                            style={getUserNameStyle(user)}
+                          >
+                            {user.username}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="empty-state modal-empty-state">
+                    Add friends from the People tab to start a chat.
+                  </div>
+                )}
+              </section>
+
+              <div className="manage-actions create-chat-modal-actions">
+                <button
+                  className="ghost-button"
+                  onClick={closeCreateThreadModal}
+                  type="button"
+                >
+                  Cancel
+                </button>
+                <button
+                  className="primary-button create-chat-button"
+                  disabled={selectedFriends.length === 0}
+                  onClick={() => void handleCreateThread()}
+                  type="button"
+                >
+                  Create chat
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {deleteThreadModalOpen && selectedThread ? (
+        <div className="modal-layer">
+          <button
+            aria-label="Close delete chat modal"
+            className="modal-scrim"
+            disabled={deleteThreadPending}
+            onClick={() => setDeleteThreadModalOpen(false)}
+            type="button"
+          />
+
+          <section
+            aria-modal="true"
+            className="modal-card confirm-modal"
+            role="dialog"
+          >
+            <div className="modal-header">
+              <div>
+                <h3>Delete chat</h3>
+                <p className="panel-copy">
+                  Delete{" "}
+                  {getThreadLabel(selectedThread, usersById, profile?.id ?? "")} for
+                  everyone.
+                </p>
+              </div>
+
+              <button
+                aria-label="Close delete chat modal"
+                className="ghost-button icon-button"
+                disabled={deleteThreadPending}
+                onClick={() => setDeleteThreadModalOpen(false)}
+                type="button"
+              >
+                <RiCloseLine aria-hidden="true" />
+              </button>
+            </div>
+
+            <div className="modal-body confirm-modal-body">
+              <p className="confirm-copy">This action cannot be undone.</p>
+
+              <div className="manage-actions modal-actions">
+                <button
+                  className="secondary-button"
+                  disabled={deleteThreadPending}
+                  onClick={() => setDeleteThreadModalOpen(false)}
+                  type="button"
+                >
+                  Cancel
+                </button>
+                <button
+                  className="ghost-button danger-button"
+                  disabled={deleteThreadPending}
+                  onClick={() => void handleDeleteThread(selectedThread.id)}
+                  type="button"
+                >
+                  {deleteThreadPending ? "Deleting..." : "Delete"}
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+      ) : null}
 
       {participantModalOpen && selectedThread ? (
         <div className="modal-layer">
@@ -1343,6 +1704,294 @@ export function ChatApp() {
         </div>
       ) : null}
     </main>
+  );
+}
+
+function decodeThreadAppSnapshot(app: ThreadAppState): {
+  error: string | null;
+  value: AppJsonValue | null;
+} {
+  try {
+    return {
+      error: null,
+      value: readThreadAppValue(app.document)
+    };
+  } catch (error) {
+    return {
+      error: error instanceof Error ? error.message : "Unable to load app state.",
+      value: null
+    };
+  }
+}
+
+function AppsPane({
+  apps,
+  collaborativeValue,
+  collaborativeValueError,
+  onBack,
+  onCreateApp,
+  onDeleteApp,
+  onOpenApp,
+  onSaveApp,
+  onValueChange,
+  selectedApp
+}: {
+  apps: ThreadAppState[];
+  collaborativeValue: AppJsonValue | null;
+  collaborativeValueError: string | null;
+  onBack: () => void;
+  onCreateApp: () => void;
+  onDeleteApp: (appId: string) => void;
+  onOpenApp: (appId: string) => void;
+  onSaveApp: (appId: string, nextValues: {
+    name: string;
+    description: string;
+    source: string;
+    value: AppJsonValue;
+  }) => Promise<void>;
+  onValueChange: (appId: string, path: AppPathSegment[], value: AppJsonPrimitive) => void;
+  selectedApp: ThreadAppState | null;
+}) {
+  const [appDetailMode, setAppDetailMode] = useState<AppDetailMode>("view");
+  const [draftName, setDraftName] = useState("");
+  const [draftDescription, setDraftDescription] = useState("");
+  const [draftSource, setDraftSource] = useState(DEFAULT_JSON5_SOURCE);
+  const [feedback, setFeedback] = useState<{
+    tone: "error" | "success";
+    message: string;
+  } | null>(null);
+
+  useEffect(() => {
+    setAppDetailMode("view");
+  }, [selectedApp?.id]);
+
+  useEffect(() => {
+    if (!selectedApp || appDetailMode === "edit") {
+      return;
+    }
+
+    setDraftName(selectedApp.name);
+    setDraftDescription(selectedApp.description);
+    setDraftSource(selectedApp.savedSource);
+  }, [
+    appDetailMode,
+    selectedApp?.description,
+    selectedApp?.id,
+    selectedApp?.name,
+    selectedApp?.savedSource
+  ]);
+
+  if (selectedApp) {
+    const currentApp = selectedApp;
+    const editing = appDetailMode === "edit";
+    const validation = validateJson5Source(draftSource);
+    const currentValue = collaborativeValue ?? {};
+    const title = editing ? draftName : currentApp.name;
+    const description = editing ? draftDescription : currentApp.description;
+    const source = editing ? draftSource : currentApp.savedSource;
+
+    function handleStartEditing() {
+      setDraftName(currentApp.name);
+      setDraftDescription(currentApp.description);
+      setDraftSource(currentApp.savedSource);
+      setFeedback(null);
+      setAppDetailMode("edit");
+    }
+
+    function handleDiscardChanges() {
+      setDraftName(currentApp.name);
+      setDraftDescription(currentApp.description);
+      setDraftSource(currentApp.savedSource);
+      setFeedback(null);
+      setAppDetailMode("view");
+    }
+
+    async function handleSaveChanges() {
+      if (validation.error || validation.value === null) {
+        setFeedback({
+          tone: "error",
+          message: validation.error ?? "Invalid JSON5."
+        });
+        return;
+      }
+
+      try {
+        await onSaveApp(currentApp.id, {
+          name: draftName,
+          description: draftDescription,
+          source: draftSource,
+          value: validation.value
+        });
+        setFeedback({
+          tone: "success",
+          message: "Saved."
+        });
+        setAppDetailMode("view");
+      } catch (error) {
+        setFeedback({
+          tone: "error",
+          message: error instanceof Error ? error.message : "Unable to save app."
+        });
+      }
+    }
+
+    return (
+      <div className="apps-browser">
+        <div className="apps-detail-head">
+          <button className="ghost-button apps-back-button" onClick={onBack} type="button">
+            <RiArrowLeftSLine aria-hidden="true" />
+            Back
+          </button>
+
+          <div className="apps-detail-copy">
+            <h3 className="apps-detail-title">{title || "Untitled app"}</h3>
+            {description ? (
+              <p className="panel-copy">{description}</p>
+            ) : (
+              <p className="panel-copy">No description yet.</p>
+            )}
+            {collaborativeValueError ? (
+              <p className="panel-copy app-collab-error">{collaborativeValueError}</p>
+            ) : null}
+            {feedback ? (
+              <p className={`panel-copy app-save-feedback-inline app-save-feedback-${feedback.tone}`}>
+                {feedback.message}
+              </p>
+            ) : null}
+          </div>
+
+          <div className="app-detail-actions">
+            {editing ? (
+              <>
+                <button
+                  aria-label="Discard local changes"
+                  className="ghost-button icon-button app-mode-button"
+                  onClick={handleDiscardChanges}
+                  title="Discard local changes"
+                  type="button"
+                >
+                  <RiCloseLine aria-hidden="true" />
+                </button>
+                <button
+                  aria-label="Save app"
+                  className="primary-button icon-button app-mode-save-button"
+                  onClick={() => void handleSaveChanges()}
+                  title="Save app"
+                  type="button"
+                >
+                  <RiCheckLine aria-hidden="true" />
+                </button>
+              </>
+            ) : (
+              <button
+                aria-label="Edit app"
+                className="ghost-button icon-button app-mode-button"
+                onClick={handleStartEditing}
+                title="Edit app"
+                type="button"
+              >
+                <RiPencilLine aria-hidden="true" />
+              </button>
+            )}
+          </div>
+        </div>
+
+        {editing ? (
+          <section className="panel app-detail-meta-panel">
+            <label className="field">
+              <span>Title</span>
+              <input
+                onChange={(event) => setDraftName(event.target.value)}
+                type="text"
+                value={draftName}
+              />
+            </label>
+
+            <label className="field">
+              <span>Description</span>
+              <textarea
+                onChange={(event) => setDraftDescription(event.target.value)}
+                placeholder="Add a short description for this app."
+                rows={3}
+                value={draftDescription}
+              />
+            </label>
+          </section>
+        ) : null}
+
+        {editing ? (
+          <Json5Workbench
+            compact
+            onSourceChange={setDraftSource}
+            parseError={validation.error}
+            source={draftSource}
+            sourceHint="Save the JSON source to publish a new shape into the shared app."
+            value={validation.value ?? currentValue}
+            viewMode="editor"
+          />
+        ) : (
+          <JsonValueWorkbench
+            onScalarChange={(path, value) => onValueChange(currentApp.id, path, value)}
+            value={currentValue}
+          />
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="apps-browser">
+      <section className="panel apps-list-panel">
+        <div className="apps-list-header">
+          <div>
+            <p className="panel-title">Apps</p>
+          </div>
+
+          <button
+            aria-label="Create app"
+            className="ghost-button icon-button apps-create-button"
+            onClick={onCreateApp}
+            title="Create app"
+            type="button"
+          >
+            <RiAddLine aria-hidden="true" />
+          </button>
+        </div>
+
+        {apps.length ? (
+          <div className="apps-list">
+            {apps.map((app) => (
+              <article className="app-card" key={app.id}>
+                <button
+                  className="app-card-main"
+                  onClick={() => onOpenApp(app.id)}
+                  type="button"
+                >
+                  <span className="app-card-name">{app.name}</span>
+                  {app.description ? (
+                    <span className="app-card-description">{app.description}</span>
+                  ) : null}
+                </button>
+
+                <div className="app-card-actions">
+                  <button
+                    aria-label={`Delete ${app.name}`}
+                    className="ghost-button icon-button danger-button app-card-delete"
+                    onClick={() => onDeleteApp(app.id)}
+                    title={`Delete ${app.name}`}
+                    type="button"
+                  >
+                    <RiDeleteBinLine aria-hidden="true" />
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <div className="empty-state">No apps yet. Create one to get started.</div>
+        )}
+      </section>
+    </div>
   );
 }
 

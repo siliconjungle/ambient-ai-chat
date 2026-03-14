@@ -1,12 +1,16 @@
 import { randomUUID } from "node:crypto";
 import type { Server } from "node:http";
 
+import * as Automerge from "@automerge/automerge";
 import type { Response } from "express";
 import cors from "cors";
 import express from "express";
 
 import {
   type AgentKind,
+  type AppJsonPrimitive,
+  type AppJsonValue,
+  type AppPathSegment,
   type AiContextMessage,
   type AiParticipantContext,
   type AiSummary,
@@ -16,10 +20,13 @@ import {
   type ClientSnapshot,
   type CommandRecommendation,
   type CommandRecommendationResponse,
+  type ThreadAppState,
   type ThreadSearchResponse,
   type UserProfile,
   createProceduralAvatar,
+  defaultThreadAppTemplates,
   extractMessageText,
+  isAppJsonValue,
   isRecord,
   sortByUpdatedAtDescending,
   uniqueIds
@@ -61,6 +68,7 @@ interface ConnectedClient {
 
 interface CommandOutcome {
   actorId: string | null;
+  appId?: string;
   threadId?: string;
   messageId?: string;
   authorId?: string;
@@ -72,6 +80,10 @@ interface SearchParams {
   query: string;
   limit: number;
 }
+
+type ThreadAppDocument = {
+  value: AppJsonValue;
+};
 
 const app = express();
 const state = createEmptyState();
@@ -169,6 +181,7 @@ app.post("/commands", (request, response) => {
 
     response.status(200).json({
       ok: true,
+      outcome,
       snapshot: outcome.actorId ? buildSnapshot(outcome.actorId) : null
     });
   } catch (error) {
@@ -504,6 +517,110 @@ function parseCommand(value: unknown): ChatCommand | null {
         agentId: value.agentId
       };
     }
+    case "thread.app.create": {
+      if (
+        typeof value.agentId !== "string" ||
+        typeof value.threadId !== "string" ||
+        typeof value.name !== "string" ||
+        typeof value.description !== "string" ||
+        typeof value.source !== "string" ||
+        !isAppJsonValue(value.value)
+      ) {
+        return null;
+      }
+
+      return {
+        command: "thread.app.create",
+        agentId: value.agentId,
+        threadId: value.threadId,
+        name: value.name,
+        description: value.description,
+        source: value.source,
+        value: value.value
+      };
+    }
+    case "thread.app.delete": {
+      if (
+        typeof value.agentId !== "string" ||
+        typeof value.threadId !== "string" ||
+        typeof value.appId !== "string"
+      ) {
+        return null;
+      }
+
+      return {
+        command: "thread.app.delete",
+        agentId: value.agentId,
+        threadId: value.threadId,
+        appId: value.appId
+      };
+    }
+    case "thread.app.meta.update": {
+      if (
+        typeof value.agentId !== "string" ||
+        typeof value.threadId !== "string" ||
+        typeof value.appId !== "string" ||
+        typeof value.name !== "string" ||
+        typeof value.description !== "string"
+      ) {
+        return null;
+      }
+
+      return {
+        command: "thread.app.meta.update",
+        agentId: value.agentId,
+        threadId: value.threadId,
+        appId: value.appId,
+        name: value.name,
+        description: value.description
+      };
+    }
+    case "thread.app.source.save": {
+      if (
+        typeof value.agentId !== "string" ||
+        typeof value.threadId !== "string" ||
+        typeof value.appId !== "string" ||
+        typeof value.source !== "string" ||
+        !isAppJsonValue(value.value)
+      ) {
+        return null;
+      }
+
+      return {
+        command: "thread.app.source.save",
+        agentId: value.agentId,
+        threadId: value.threadId,
+        appId: value.appId,
+        source: value.source,
+        value: value.value
+      };
+    }
+    case "thread.app.form.update": {
+      if (
+        typeof value.agentId !== "string" ||
+        typeof value.threadId !== "string" ||
+        typeof value.appId !== "string" ||
+        !Array.isArray(value.path) ||
+        value.path.some(
+          (segment) => typeof segment !== "string" && typeof segment !== "number"
+        ) ||
+        (value.value !== null &&
+          typeof value.value !== "string" &&
+          typeof value.value !== "number" &&
+          typeof value.value !== "boolean")
+      ) {
+        return null;
+      }
+
+      return {
+        command: "thread.app.form.update",
+        agentId: value.agentId,
+        threadId: value.threadId,
+        appId: value.appId,
+        path: value.path,
+        value: value.value
+      };
+    }
     default:
       return null;
   }
@@ -565,6 +682,12 @@ function applyCommand(command: ChatCommand): CommandOutcome {
         updatedAt: now,
         summary: null
       });
+      state.appsByThread.set(
+        threadId,
+        defaultThreadAppTemplates.map((template) =>
+          createThreadAppState(template, command.agentId, now)
+        )
+      );
       state.messagesByThread.set(threadId, []);
 
       return {
@@ -578,6 +701,7 @@ function applyCommand(command: ChatCommand): CommandOutcome {
       for (const message of messages) {
         state.messageEmbeddings.delete(message.id);
       }
+      state.appsByThread.delete(thread.id);
       state.messagesByThread.delete(thread.id);
       return {
         actorId: command.agentId
@@ -613,6 +737,7 @@ function applyCommand(command: ChatCommand): CommandOutcome {
         for (const message of messages) {
           state.messageEmbeddings.delete(message.id);
         }
+        state.appsByThread.delete(thread.id);
         state.messagesByThread.delete(thread.id);
       } else {
         state.threads.set(thread.id, {
@@ -694,6 +819,120 @@ function applyCommand(command: ChatCommand): CommandOutcome {
         actorId: command.agentId
       };
     }
+    case "thread.app.source.save": {
+      const thread = getThreadForAgent(command.threadId, command.agentId);
+      if (!command.source.trim()) {
+        throw new Error("App source cannot be empty.");
+      }
+
+      const now = new Date().toISOString();
+      const app = getThreadApp(thread.id, command.appId);
+      updateThreadApp(thread.id, app.id, {
+        ...app,
+        savedSource: command.source,
+        document: encodeThreadAppDocument(createThreadAppDocument(command.value)),
+        updatedAt: now,
+        updatedBy: command.agentId
+      });
+      state.threads.set(thread.id, {
+        ...thread,
+        updatedAt: now
+      });
+
+      return {
+        actorId: command.agentId
+      };
+    }
+    case "thread.app.create": {
+      const thread = getThreadForAgent(command.threadId, command.agentId);
+      if (!command.source.trim()) {
+        throw new Error("App source cannot be empty.");
+      }
+
+      const now = new Date().toISOString();
+      const appId = randomUUID();
+      const currentApps = state.appsByThread.get(thread.id) ?? [];
+      state.appsByThread.set(thread.id, [
+        ...currentApps,
+        {
+          id: appId,
+          name: command.name.trim() || "Untitled app",
+          description: command.description.trim(),
+          savedSource: command.source,
+          document: encodeThreadAppDocument(createThreadAppDocument(command.value)),
+          updatedAt: now,
+          updatedBy: command.agentId
+        }
+      ]);
+      state.threads.set(thread.id, {
+        ...thread,
+        updatedAt: now
+      });
+
+      return {
+        actorId: command.agentId,
+        appId
+      };
+    }
+    case "thread.app.delete": {
+      const thread = getThreadForAgent(command.threadId, command.agentId);
+      getThreadApp(thread.id, command.appId);
+      const now = new Date().toISOString();
+      removeThreadApp(thread.id, command.appId);
+      state.threads.set(thread.id, {
+        ...thread,
+        updatedAt: now
+      });
+
+      return {
+        actorId: command.agentId
+      };
+    }
+    case "thread.app.meta.update": {
+      const thread = getThreadForAgent(command.threadId, command.agentId);
+      const app = getThreadApp(thread.id, command.appId);
+      const now = new Date().toISOString();
+      updateThreadApp(thread.id, app.id, {
+        ...app,
+        name: command.name.trim() || "Untitled app",
+        description: command.description.trim(),
+        updatedAt: now,
+        updatedBy: command.agentId
+      });
+      state.threads.set(thread.id, {
+        ...thread,
+        updatedAt: now
+      });
+
+      return {
+        actorId: command.agentId
+      };
+    }
+    case "thread.app.form.update": {
+      const thread = getThreadForAgent(command.threadId, command.agentId);
+      const app = getThreadApp(thread.id, command.appId);
+      const now = new Date().toISOString();
+      const nextDocument = updateThreadAppDocument(
+        decodeThreadAppDocument(app.document),
+        command.path,
+        command.value
+      );
+
+      updateThreadApp(thread.id, app.id, {
+        ...app,
+        document: encodeThreadAppDocument(nextDocument),
+        updatedAt: now,
+        updatedBy: command.agentId
+      });
+      state.threads.set(thread.id, {
+        ...thread,
+        updatedAt: now
+      });
+
+      return {
+        actorId: command.agentId
+      };
+    }
   }
 }
 
@@ -714,6 +953,179 @@ function getThreadForAgent(threadId: string, agentId: string): ChatThread {
   }
 
   return thread;
+}
+
+function getThreadApp(threadId: string, appId: string): ThreadAppState {
+  const apps = state.appsByThread.get(threadId) ?? [];
+  const app = apps.find((candidate) => candidate.id === appId);
+
+  if (!app) {
+    throw new Error("App not found.");
+  }
+
+  return app;
+}
+
+function updateThreadApp(threadId: string, appId: string, nextApp: ThreadAppState): void {
+  const apps = state.appsByThread.get(threadId) ?? [];
+  state.appsByThread.set(
+    threadId,
+    apps.map((app) => (app.id === appId ? nextApp : app))
+  );
+}
+
+function removeThreadApp(threadId: string, appId: string): void {
+  const apps = state.appsByThread.get(threadId) ?? [];
+  state.appsByThread.set(
+    threadId,
+    apps.filter((app) => app.id !== appId)
+  );
+}
+
+function ensureAllThreadApps(): boolean {
+  let changed = false;
+
+  for (const thread of state.threads.values()) {
+    const currentApps = state.appsByThread.get(thread.id) ?? [];
+    const normalizedApps = currentApps.map(normalizeThreadAppState);
+    const currentAppsById = new Map(normalizedApps.map((app) => [app.id, app]));
+    const defaultTemplateIds = new Set(defaultThreadAppTemplates.map((template) => template.id));
+    const nextApps = defaultThreadAppTemplates.map((template) => {
+      const existing = currentAppsById.get(template.id);
+      if (existing) {
+        return existing;
+      }
+
+      changed = true;
+      return createThreadAppState(template, thread.createdBy, thread.createdAt);
+    });
+    const customApps = normalizedApps.filter((app) => !defaultTemplateIds.has(app.id));
+    const mergedApps = [...nextApps, ...customApps];
+
+    if (
+      normalizedApps.length !== mergedApps.length ||
+      normalizedApps.some((app, index) => mergedApps[index] !== app)
+    ) {
+      changed = true;
+    }
+
+    state.appsByThread.set(thread.id, mergedApps);
+  }
+
+  for (const threadId of [...state.appsByThread.keys()]) {
+    if (!state.threads.has(threadId)) {
+      state.appsByThread.delete(threadId);
+      changed = true;
+    }
+  }
+
+  return changed;
+}
+
+function createThreadAppState(
+  template: (typeof defaultThreadAppTemplates)[number],
+  actorId: string,
+  updatedAt = new Date().toISOString()
+): ThreadAppState {
+  return {
+    id: template.id,
+    name: template.name,
+    description: template.description,
+    savedSource: template.source,
+    document: encodeThreadAppDocument(createThreadAppDocument(template.value)),
+    updatedAt,
+    updatedBy: actorId
+  };
+}
+
+function normalizeThreadAppState(app: ThreadAppState): ThreadAppState {
+  return {
+    ...app,
+    description: typeof app.description === "string" ? app.description : ""
+  };
+}
+
+function createThreadAppDocument(
+  value: AppJsonValue
+): Automerge.Doc<ThreadAppDocument> {
+  return Automerge.from<ThreadAppDocument>({
+    value: cloneAppJsonValue(value)
+  });
+}
+
+function encodeThreadAppDocument(document: Automerge.Doc<ThreadAppDocument>): string {
+  return Buffer.from(Automerge.save(document)).toString("base64");
+}
+
+function decodeThreadAppDocument(encoded: string): Automerge.Doc<ThreadAppDocument> {
+  return Automerge.load<ThreadAppDocument>(
+    Uint8Array.from(Buffer.from(encoded, "base64"))
+  );
+}
+
+function updateThreadAppDocument(
+  document: Automerge.Doc<ThreadAppDocument>,
+  path: AppPathSegment[],
+  nextValue: AppJsonPrimitive
+): Automerge.Doc<ThreadAppDocument> {
+  return Automerge.change(document, (draft) => {
+    if (path.length === 0) {
+      draft.value = nextValue;
+      return;
+    }
+
+    let target: unknown = draft.value;
+
+    for (let index = 0; index < path.length - 1; index += 1) {
+      const segment = path[index]!;
+
+      if (typeof segment === "number") {
+        if (!Array.isArray(target) || segment < 0 || segment >= target.length) {
+          throw new Error("Invalid app field path.");
+        }
+
+        target = target[segment];
+        continue;
+      }
+
+      if (!isRecord(target) || !(segment in target)) {
+        throw new Error("Invalid app field path.");
+      }
+
+      target = target[segment];
+    }
+
+    const lastSegment = path[path.length - 1]!;
+
+    if (typeof lastSegment === "number") {
+      if (!Array.isArray(target) || lastSegment < 0 || lastSegment >= target.length) {
+        throw new Error("Invalid app field path.");
+      }
+
+      const currentValue = target[lastSegment];
+      if (typeof currentValue === "object" && currentValue !== null) {
+        throw new Error("Only scalar app fields can be updated.");
+      }
+
+      target[lastSegment] = nextValue;
+      return;
+    }
+
+    if (!isRecord(target) || !(lastSegment in target)) {
+      throw new Error("Invalid app field path.");
+    }
+
+    const currentValue = target[lastSegment];
+    if (typeof currentValue === "object" && currentValue !== null) {
+      throw new Error("Only scalar app fields can be updated.");
+    }
+
+    target[lastSegment] = nextValue;
+  });
+}
+
+function cloneAppJsonValue(value: AppJsonValue): AppJsonValue {
+  return JSON.parse(JSON.stringify(value)) as AppJsonValue;
 }
 
 function addFriendship(leftId: string, rightId: string): void {
@@ -756,8 +1168,10 @@ function buildSnapshot(agentId: string): ClientSnapshot {
     )
   );
 
+  const appsByThread: Record<string, ThreadAppState[]> = {};
   const messages: Record<string, ChatMessage[]> = {};
   for (const thread of visibleThreads) {
+    appsByThread[thread.id] = [...(state.appsByThread.get(thread.id) ?? [])];
     messages[thread.id] = [...(state.messagesByThread.get(thread.id) ?? [])].sort(
       (left, right) =>
         new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime()
@@ -771,6 +1185,7 @@ function buildSnapshot(agentId: string): ClientSnapshot {
     ),
     friendIds: [...(state.friendships.get(agentId) ?? new Set())].sort(),
     threads: visibleThreads,
+    appsByThread,
     messagesByThread: messages,
     serverTime: new Date().toISOString()
   };
@@ -806,6 +1221,9 @@ async function startServer(): Promise<void> {
 async function loadPersistedState(): Promise<void> {
   const persistedState = await loadStateFromDisk(env.stateFile);
   replaceState(persistedState);
+  if (ensureAllThreadApps()) {
+    await saveStateToDisk(env.stateFile, state);
+  }
 
   console.log(
     `Loaded persisted state: ${state.users.size} users, ${state.threads.size} threads, ${state.messageEmbeddings.size} message embeddings, ${state.commandEmbeddings.size} command embeddings`
@@ -816,6 +1234,7 @@ function replaceState(nextState: StoreState): void {
   state.users = nextState.users;
   state.friendships = nextState.friendships;
   state.threads = nextState.threads;
+  state.appsByThread = nextState.appsByThread;
   state.messagesByThread = nextState.messagesByThread;
   state.messageEmbeddings = nextState.messageEmbeddings;
   state.commandEmbeddings = nextState.commandEmbeddings;

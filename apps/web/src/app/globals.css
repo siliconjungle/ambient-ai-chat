@@ -217,6 +217,43 @@ textarea::placeholder {
   margin-bottom: var(--space-4);
 }
 
+.sidebar-tabs {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-bottom: 0;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.sidebar-tabs button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.sidebar-tabs button svg {
+  font-size: 1.05rem;
+}
+
+.conversation-tabs {
+  width: fit-content;
+  max-width: 100%;
+  margin-bottom: 0;
+}
+
+.conversation-tabs button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 3rem;
+  padding: 0;
+}
+
+.conversation-tabs button svg {
+  width: 1rem;
+  height: 1rem;
+}
+
 .pill-tabs button,
 .kind-toggle button {
   min-height: 2.5rem;
@@ -254,18 +291,16 @@ textarea::placeholder {
   padding: var(--space-4);
 }
 
-.create-chat-panel {
-  display: grid;
-  gap: var(--space-4);
+.sidebar-action-panel {
+  padding: var(--space-3);
 }
 
-.create-chat-panel .field,
-.create-chat-panel .selection-list {
-  margin-top: 0;
+.sidebar-action-row {
+  display: flex;
 }
 
-.create-chat-actions {
-  padding-top: var(--space-2);
+.sidebar-action-row .create-chat-button {
+  width: 100%;
 }
 
 .primary-button.create-chat-button {
@@ -342,6 +377,7 @@ textarea::placeholder {
 }
 
 .field input,
+.field textarea,
 .composer textarea,
 .search-field input {
   width: 100%;
@@ -355,11 +391,18 @@ textarea::placeholder {
 }
 
 .field input:focus,
+.field textarea:focus,
 .composer textarea:focus,
 .search-field input:focus,
 .avatar-trigger:focus {
   border-color: var(--line-strong);
   box-shadow: var(--focus-ring);
+}
+
+.field textarea {
+  min-height: 6.75rem;
+  padding-block: var(--space-3);
+  resize: vertical;
 }
 
 .selection-list {
@@ -371,6 +414,7 @@ textarea::placeholder {
 
 .selection-chip,
 .thread-card,
+.app-card,
 .reaction-pill,
 .reaction-add,
 .participant-more,
@@ -461,6 +505,7 @@ textarea::placeholder {
 .ghost-button:not(:disabled):hover,
 .selection-chip:hover,
 .thread-card:hover,
+.app-card:hover,
 .reaction-pill:hover,
 .reaction-add:hover,
 .participant-more:hover {
@@ -472,13 +517,23 @@ textarea::placeholder {
   margin-top: var(--space-4);
 }
 
-.thread-card {
+.sidebar-thread-list {
+  margin-top: 0;
+}
+
+.thread-card,
+.app-card {
   display: grid;
   gap: var(--space-2);
   width: 100%;
   padding: var(--space-4);
   border-radius: var(--radius-3);
   text-align: left;
+}
+
+.app-card {
+  align-items: start;
+  color: var(--text);
 }
 
 .thread-card-active {
@@ -519,6 +574,17 @@ textarea::placeholder {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.app-card-name {
+  font-size: 0.96rem;
+  font-weight: 600;
+}
+
+.app-card-shape {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
 }
 
 .thread-participant-strip {
@@ -870,7 +936,12 @@ textarea::placeholder {
   font-size: 0.82rem;
 }
 
+.conversation-tools .conversation-tabs {
+  flex-shrink: 0;
+}
+
 .hamburger {
+  align-self: flex-start;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -977,6 +1048,141 @@ textarea::placeholder {
   background:
     linear-gradient(180deg, rgba(9, 10, 12, 0.94), rgba(9, 10, 12, 0.99)),
     radial-gradient(circle at bottom right, rgba(255, 255, 255, 0.025), transparent 28%);
+}
+
+.conversation-body-apps {
+  overflow: auto;
+}
+
+.apps-browser {
+  display: grid;
+  gap: var(--space-4);
+  align-content: start;
+}
+
+.apps-list {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.apps-list-panel {
+  display: grid;
+  gap: var(--space-4);
+  align-content: start;
+}
+
+.apps-list-header,
+.apps-detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.apps-detail-title {
+  margin: 0;
+  font-size: 1.02rem;
+}
+
+.apps-detail-copy {
+  min-width: 0;
+  flex: 1 1 18rem;
+}
+
+.app-detail-meta-panel {
+  align-content: start;
+}
+
+.app-detail-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.app-mode-button {
+  background: var(--surface-muted);
+  color: var(--text-soft);
+}
+
+.app-mode-save-button {
+  border-color: var(--line-strong);
+  background: var(--surface-active);
+  color: var(--text);
+}
+
+.app-mode-save-button:not(:disabled):hover {
+  background: rgba(255, 255, 255, 0.16);
+  color: var(--accent-ink);
+}
+
+.app-card-main {
+  display: grid;
+  gap: var(--space-2);
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+.app-card-description {
+  color: var(--text-soft);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.app-save-feedback {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2rem;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-2);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.app-save-feedback-success {
+  background: rgba(143, 214, 171, 0.12);
+  color: var(--success);
+}
+
+.app-save-feedback-inline {
+  width: fit-content;
+  margin-top: var(--space-2);
+}
+
+.app-save-feedback-error,
+.app-collab-error {
+  color: var(--danger);
+}
+
+.app-card-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: var(--space-3);
+  margin-top: var(--space-3);
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.apps-create-button,
+.app-card-delete {
+  color: var(--text);
+}
+
+.apps-back-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding-left: var(--space-3);
+  padding-right: var(--space-3);
+}
+
+.apps-back-button svg {
+  width: 1.05rem;
+  height: 1.05rem;
 }
 
 .message-scroller {
@@ -1369,6 +1575,10 @@ textarea::placeholder {
   gap: var(--space-4);
 }
 
+.modal-field {
+  margin-top: 0;
+}
+
 .modal-section {
   display: grid;
   gap: var(--space-4);
@@ -1380,6 +1590,26 @@ textarea::placeholder {
   align-items: flex-start;
 }
 
+.confirm-modal {
+  width: min(28rem, 100%);
+  max-height: none;
+  grid-template-rows: auto auto;
+}
+
+.confirm-modal-body {
+  overflow: visible;
+}
+
+.confirm-copy {
+  margin: 0;
+  color: var(--text-soft);
+  line-height: 1.5;
+}
+
+.modal-actions {
+  justify-content: flex-end;
+}
+
 .modal-section .selection-list {
   margin-top: 0;
 }
@@ -1387,6 +1617,19 @@ textarea::placeholder {
 .modal-section .empty-state {
   place-items: start;
   text-align: left;
+}
+
+.create-chat-modal-section {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.create-chat-modal-actions {
+  justify-content: flex-end;
+}
+
+.modal-empty-state {
+  margin-top: 0;
 }
 
 @media (min-width: 960px) {
