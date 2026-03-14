@@ -19,13 +19,15 @@ The server now also provides:
 ## Run
 
 1. `npm install`
-2. `npm run dev`
+2. Copy [`/Volumes/Repos/social-platform/.env.example`](/Volumes/Repos/social-platform/.env.example) into the env file(s) you want to use.
+3. For the backend specifically, copy the server section into [`/Volumes/Repos/social-platform/apps/server/.env`](/Volumes/Repos/social-platform/apps/server/.env) and add your real `OPENAI_API_KEY`.
+4. `npm run dev`
 
 The web client runs on `http://localhost:3000` and the server runs on `http://localhost:4000`.
 
 By default the server persists chat state, friendships, summaries, and embeddings to `apps/server/.data/server-state.json`. Override that path with `STATE_FILE=/absolute/path/to/state.json`.
 
-The backend reads its OpenAI settings from [`apps/server/.env`](/Volumes/Repos/social-platform/apps/server/.env). A safe template lives at [`apps/server/.env.example`](/Volumes/Repos/social-platform/apps/server/.env.example).
+The backend reads its OpenAI settings from [`apps/server/.env`](/Volumes/Repos/social-platform/apps/server/.env). A repo-wide skeleton lives at [`/Volumes/Repos/social-platform/.env.example`](/Volumes/Repos/social-platform/.env.example), and the backend-only template lives at [`/Volumes/Repos/social-platform/apps/server/.env.example`](/Volumes/Repos/social-platform/apps/server/.env.example).
 
 Use the CLI with `npm run dev -w @social/cli -- --help`.
 
