@@ -15,11 +15,11 @@ export function JsonTestClient() {
     <main className={styles.page}>
       <div className={styles.hero}>
         <p className={styles.eyebrow}>/json-test</p>
-        <h1 className={styles.title}>JSON5 in, form out.</h1>
+        <h1 className={styles.title}>JSON5 spec in, `json-render` out.</h1>
         <p className={styles.subtitle}>
-          Type arbitrary JSON5 on the left. The right-hand side renders a naive
-          form from it: strings become inputs, booleans become switches, arrays
-          become containers, and nested structures recurse all the way down.
+          Type a `json-render` spec on the left. The right-hand side uses the
+          stock shadcn registry so the preview matches the real renderer. Plain
+          JSON sources still load through a legacy compatibility path.
         </p>
       </div>
 

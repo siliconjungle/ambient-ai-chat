@@ -48,6 +48,11 @@ export interface ChatMessage {
   reactions: MessageReaction[];
 }
 
+export interface EmbeddedAppMessage {
+  appId: string;
+  appName: string;
+}
+
 export interface ChatThread {
   id: string;
   title: string;
@@ -63,6 +68,10 @@ export type AppJsonArray = AppJsonValue[];
 export type AppJsonObject = { [key: string]: AppJsonValue };
 export type AppJsonValue = AppJsonPrimitive | AppJsonArray | AppJsonObject;
 export type AppPathSegment = string | number;
+export interface JsonRenderSpecValidationResult {
+  issues: string[];
+  valid: boolean;
+}
 
 export interface ThreadAppTemplate {
   id: string;
@@ -272,7 +281,7 @@ export type ChatCommand =
       threadId: string;
       appId: string;
       path: AppPathSegment[];
-      value: AppJsonPrimitive;
+      value: AppJsonValue;
     };
 
 export const defaultThreadAppTemplates: ThreadAppTemplate[] = [];
@@ -517,11 +526,319 @@ export function isAppJsonValue(value: unknown): value is AppJsonValue {
   return Object.values(value).every((item) => isAppJsonValue(item));
 }
 
+export function looksLikeJsonRenderSpec(value: AppJsonValue): boolean {
+  return (
+    isRecord(value) &&
+    ("root" in value || "elements" in value || "state" in value)
+  );
+}
+
+export function validateJsonRenderSpecShape(
+  value: AppJsonValue
+): JsonRenderSpecValidationResult {
+  if (!isRecord(value)) {
+    return {
+      issues: ["Spec must be a JSON object."],
+      valid: false
+    };
+  }
+
+  const issues: string[] = [];
+  const root = value.root;
+  const elements = value.elements;
+
+  if (typeof root !== "string" || !root.trim()) {
+    issues.push('Spec field "root" must be a non-empty string.');
+  }
+
+  if (!isRecord(elements)) {
+    issues.push('Spec field "elements" must be an object.');
+  }
+
+  if ("state" in value && value.state !== undefined && !isRecord(value.state)) {
+    issues.push('Spec field "state" must be an object when present.');
+  }
+
+  if (!isRecord(elements)) {
+    return {
+      issues,
+      valid: false
+    };
+  }
+
+  if (typeof root === "string" && root && !(root in elements)) {
+    issues.push(`Root element "${root}" is missing from elements.`);
+  }
+
+  const elementKeys = new Set(Object.keys(elements));
+
+  for (const [elementId, candidate] of Object.entries(elements)) {
+    if (!isRecord(candidate)) {
+      issues.push(`Element "${elementId}" must be an object.`);
+      continue;
+    }
+
+    if (typeof candidate.type !== "string" || !candidate.type.trim()) {
+      issues.push(`Element "${elementId}" must have a non-empty string "type".`);
+    }
+
+    if (!isRecord(candidate.props)) {
+      issues.push(`Element "${elementId}" must have an object "props".`);
+    }
+
+    if (
+      "children" in candidate &&
+      (!Array.isArray(candidate.children) ||
+        candidate.children.some((child) => typeof child !== "string"))
+    ) {
+      issues.push(
+        `Element "${elementId}" must use a "children" array of element ids when present.`
+      );
+    }
+
+    if (isRecord(candidate.props)) {
+      for (const field of ["visible", "on", "repeat", "watch"]) {
+        if (field in candidate.props) {
+          issues.push(
+            `Element "${elementId}" must put "${field}" on the element, not inside props.`
+          );
+        }
+      }
+    }
+
+    if (Array.isArray(candidate.children)) {
+      for (const childId of candidate.children) {
+        if (typeof childId !== "string") {
+          continue;
+        }
+
+        if (!elementKeys.has(childId)) {
+          issues.push(
+            `Element "${elementId}" references missing child "${childId}".`
+          );
+        }
+      }
+    }
+  }
+
+  return {
+    issues,
+    valid: issues.length === 0
+  };
+}
+
+export function collectStreamingJsonCandidates(
+  source: string,
+  maxTrimSteps = 480
+): string[] {
+  const candidates = new Set<string>();
+
+  for (const seed of collectBaseJsonFragments(source)) {
+    let working = seed.trim();
+    let trims = 0;
+
+    while (working && trims <= Math.min(maxTrimSteps, working.length)) {
+      addJsonCandidate(candidates, working);
+      addJsonCandidate(candidates, autoCloseJsonCandidate(working));
+
+      const next = trimJsonCandidateTail(working);
+      working =
+        next && next !== working
+          ? next
+          : working.slice(0, Math.max(0, working.length - 1)).trimEnd();
+      trims += 1;
+    }
+  }
+
+  return [...candidates];
+}
+
+function collectBaseJsonFragments(source: string): string[] {
+  const trimmed = source.trim();
+  const fragments = new Set<string>();
+
+  if (trimmed) {
+    fragments.add(trimmed);
+  }
+
+  const fencedMatch = trimmed.match(/```(?:json|json5)?\s*([\s\S]*?)```/i);
+  if (fencedMatch?.[1]?.trim()) {
+    fragments.add(fencedMatch[1].trim());
+  }
+
+  const firstObjectIndex = trimmed.indexOf("{");
+  if (firstObjectIndex >= 0) {
+    fragments.add(trimmed.slice(firstObjectIndex).trim());
+  }
+
+  const firstArrayIndex = trimmed.indexOf("[");
+  if (firstArrayIndex >= 0) {
+    fragments.add(trimmed.slice(firstArrayIndex).trim());
+  }
+
+  return [...fragments];
+}
+
+function addJsonCandidate(target: Set<string>, candidate: string): void {
+  const normalized = candidate.trim();
+  if (normalized) {
+    target.add(normalized);
+  }
+}
+
+function trimJsonCandidateTail(source: string): string {
+  let next = source.trimEnd();
+
+  if (!next) {
+    return "";
+  }
+
+  if (next.endsWith("/*")) {
+    return next.slice(0, -2).trimEnd();
+  }
+
+  const lineCommentIndex = next.lastIndexOf("//");
+  if (
+    lineCommentIndex >= 0 &&
+    next.slice(lineCommentIndex).indexOf("\n") === -1
+  ) {
+    return next.slice(0, lineCommentIndex).trimEnd();
+  }
+
+  while (/[,:]$/.test(next)) {
+    next = next.slice(0, -1).trimEnd();
+  }
+
+  return next;
+}
+
+function autoCloseJsonCandidate(source: string): string {
+  let next = source.trimEnd();
+  const stack: string[] = [];
+  let quote: '"' | "'" | null = null;
+  let escaping = false;
+  let lineComment = false;
+  let blockComment = false;
+
+  for (let index = 0; index < next.length; index += 1) {
+    const char = next[index]!;
+    const following = next[index + 1] ?? "";
+
+    if (lineComment) {
+      if (char === "\n") {
+        lineComment = false;
+      }
+      continue;
+    }
+
+    if (blockComment) {
+      if (char === "*" && following === "/") {
+        blockComment = false;
+        index += 1;
+      }
+      continue;
+    }
+
+    if (quote) {
+      if (escaping) {
+        escaping = false;
+        continue;
+      }
+
+      if (char === "\\") {
+        escaping = true;
+        continue;
+      }
+
+      if (char === quote) {
+        quote = null;
+      }
+      continue;
+    }
+
+    if (char === "/" && following === "/") {
+      lineComment = true;
+      index += 1;
+      continue;
+    }
+
+    if (char === "/" && following === "*") {
+      blockComment = true;
+      index += 1;
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+
+    if (char === "{") {
+      stack.push("}");
+      continue;
+    }
+
+    if (char === "[") {
+      stack.push("]");
+      continue;
+    }
+
+    if ((char === "}" || char === "]") && stack.at(-1) === char) {
+      stack.pop();
+    }
+  }
+
+  if (lineComment) {
+    next += "\n";
+  }
+
+  if (blockComment) {
+    next += "*/";
+  }
+
+  if (quote) {
+    next += quote;
+  }
+
+  next = trimJsonCandidateTail(next);
+
+  for (let index = stack.length - 1; index >= 0; index -= 1) {
+    next += stack[index];
+  }
+
+  return next.trim();
+}
+
+export function readEmbeddedAppMessage(
+  message: Pick<ChatMessage, "message" | "type">
+): EmbeddedAppMessage | null {
+  if (message.type !== "chat.app.embed") {
+    return null;
+  }
+
+  const appId = message.message.appId;
+  const appName = message.message.appName;
+
+  if (typeof appId !== "string" || typeof appName !== "string") {
+    return null;
+  }
+
+  return {
+    appId,
+    appName
+  };
+}
+
 export function extractMessageText(
-  message: Pick<ChatMessage, "message">
+  message: Pick<ChatMessage, "message" | "type">
 ): string {
   if (typeof message.message.text === "string") {
     return message.message.text;
+  }
+
+  const embeddedApp = readEmbeddedAppMessage(message);
+  if (embeddedApp) {
+    return `Shared app: ${embeddedApp.appName}`;
   }
 
   return JSON.stringify(message.message);

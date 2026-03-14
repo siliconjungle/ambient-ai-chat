@@ -34,7 +34,6 @@ import {
 
 import {
   type AgentKind,
-  type AppJsonPrimitive,
   type AppJsonValue,
   type AppPathSegment,
   type ChatMessage,
@@ -45,20 +44,22 @@ import {
   type ThreadSearchResult,
   type UserProfile,
   createProceduralAvatar,
-  extractMessageText
+  extractMessageText,
+  readEmbeddedAppMessage
 } from "@social/shared";
 
 import {
   chatServerUrl,
   searchThreadMessages,
-  sendCommand
+  sendCommand,
+  streamAppSource
 } from "../lib/chat-api";
 import { getProceduralAvatarDataUrl } from "../lib/avatar-renderer";
 import {
   DEFAULT_JSON5_SOURCE,
+  JsonRenderSurface,
   Json5Workbench,
   JsonValueWorkbench,
-  summarizeJson5Shape,
   validateJson5Source
 } from "./json5-form-editor";
 import {
@@ -109,11 +110,13 @@ export function ChatApp() {
   const [searchError, setSearchError] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [selectedAppId, setSelectedAppId] = useState<string | null>(null);
+  const [appPickerOpen, setAppPickerOpen] = useState(false);
 
   const deferredFriendSearch = useDeferredValue(friendSearch);
   const deferredMessageSearchQuery = useDeferredValue(messageSearchQuery);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const appPickerRef = useRef<HTMLDivElement | null>(null);
   const messageNodeRefs = useRef(new Map<string, HTMLElement | null>());
   const hasAutoOpenedEmptyStateRef = useRef(false);
   const copiedTimeoutRef = useRef<number | null>(null);
@@ -128,8 +131,17 @@ export function ChatApp() {
   const activeApps = selectedThreadId
     ? snapshot?.appsByThread[selectedThreadId] ?? []
     : [];
+  const activeAppEntries = activeApps.map((app) => ({
+    app,
+    snapshot: decodeThreadAppSnapshot(app)
+  }));
+  const activeAppEntriesById = new Map(
+    activeAppEntries.map(({ app, snapshot }) => [app.id, { app, snapshot }])
+  );
   const selectedApp = activeApps.find((app) => app.id === selectedAppId) ?? null;
-  const selectedAppState = selectedApp ? decodeThreadAppSnapshot(selectedApp) : null;
+  const selectedAppState = selectedApp
+    ? activeAppEntriesById.get(selectedApp.id)?.snapshot ?? null
+    : null;
   const usersById = new Map(
     snapshot?.users.map((user) => [user.id, user]) ?? []
   );
@@ -273,6 +285,7 @@ export function ChatApp() {
     setReactionTargetId(null);
     setConversationTab("feed");
     setSelectedAppId(null);
+    setAppPickerOpen(false);
     setSearchOpen(false);
     setMessageSearchQuery("");
     setSearchResults([]);
@@ -285,8 +298,43 @@ export function ChatApp() {
       return;
     }
 
+    setAppPickerOpen(false);
     closeSearch();
   }, [conversationTab]);
+
+  useEffect(() => {
+    if (!appPickerOpen) {
+      return;
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target;
+
+      if (!(target instanceof Node)) {
+        return;
+      }
+
+      if (appPickerRef.current?.contains(target)) {
+        return;
+      }
+
+      setAppPickerOpen(false);
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setAppPickerOpen(false);
+      }
+    }
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [appPickerOpen]);
 
   useEffect(() => {
     if (!searchOpen) {
@@ -561,10 +609,42 @@ export function ChatApp() {
           text: nextDraft
         }
       });
+      setAppPickerOpen(false);
     } catch (error) {
       setDraft(nextDraft);
       setErrorMessage(
         error instanceof Error ? error.message : "Unable to send message."
+      );
+    }
+  }
+
+  async function handleSendAppEmbed(appId: string) {
+    if (!profile || !selectedThreadId) {
+      return;
+    }
+
+    const app = activeApps.find((candidate) => candidate.id === appId);
+    if (!app) {
+      setErrorMessage("App not found.");
+      return;
+    }
+
+    try {
+      await sendCommand({
+        command: "message.send",
+        threadId: selectedThreadId,
+        agentId: profile.id,
+        agentKind: profile.kind,
+        type: "chat.app.embed",
+        message: {
+          appId: app.id,
+          appName: app.name
+        }
+      });
+      setAppPickerOpen(false);
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error ? error.message : "Unable to share app."
       );
     }
   }
@@ -773,7 +853,7 @@ export function ChatApp() {
   async function handleUpdateAppField(
     appId: string,
     path: AppPathSegment[],
-    value: AppJsonPrimitive
+    value: AppJsonValue
   ) {
     if (!selectedThreadId || !profile?.id) {
       return;
@@ -793,6 +873,30 @@ export function ChatApp() {
         error instanceof Error ? error.message : "Unable to update app field."
       );
     }
+  }
+
+  async function handleGenerateAppDraft(params: {
+    prompt: string;
+    name: string;
+    description: string;
+    currentSource: string;
+    onDelta: (accumulated: string) => void;
+  }) {
+    if (!selectedThreadId || !profile?.id) {
+      throw new Error("No active thread selected.");
+    }
+
+    return streamAppSource({
+      agentId: profile.id,
+      threadId: selectedThreadId,
+      prompt: params.prompt,
+      name: params.name,
+      description: params.description,
+      currentSource: params.currentSource,
+      onDelta: (_delta, accumulated) => {
+        params.onDelta(accumulated);
+      }
+    });
   }
 
   return (
@@ -1284,7 +1388,14 @@ export function ChatApp() {
                               </div>
 
                               <div className="message-content">
-                                {renderMessage(message)}
+                                {renderMessage(message, {
+                                  appLookup: activeAppEntriesById,
+                                  onOpenApp: (appId) => {
+                                    setConversationTab("apps");
+                                    setSelectedAppId(appId);
+                                  },
+                                  onValueChange: handleUpdateAppField
+                                })}
                               </div>
 
                               <div className="reaction-row">
@@ -1345,6 +1456,7 @@ export function ChatApp() {
                       onBack={() => setSelectedAppId(null)}
                       onCreateApp={() => void handleCreateApp()}
                       onDeleteApp={(appId) => void handleDeleteApp(appId)}
+                      onGenerateSource={handleGenerateAppDraft}
                       onOpenApp={setSelectedAppId}
                       onSaveApp={(appId, nextValues) => handleSaveApp(appId, nextValues)}
                       onValueChange={handleUpdateAppField}
@@ -1376,14 +1488,66 @@ export function ChatApp() {
                   {errorMessage ? <p className="error-banner">{errorMessage}</p> : null}
 
                   <div className="composer-shell">
-                    <textarea
-                      disabled={!selectedThread}
-                      onChange={(event) => setDraft(event.target.value)}
-                      onKeyDown={handleComposerKeyDown}
-                      placeholder="Send a message"
-                      rows={1}
-                      value={draft}
-                    />
+                    <div className="composer-input-row">
+                      <div className="composer-app-picker" ref={appPickerRef}>
+                        <button
+                          aria-expanded={appPickerOpen}
+                          aria-haspopup="menu"
+                          className="ghost-button icon-button composer-app-trigger"
+                          disabled={!selectedThread}
+                          onClick={() => setAppPickerOpen((current) => !current)}
+                          title="Share app"
+                          type="button"
+                        >
+                          <RiAddLine aria-hidden="true" />
+                        </button>
+
+                        {appPickerOpen ? (
+                          <div
+                            aria-label="Apps in this chat"
+                            className="composer-app-menu"
+                            role="menu"
+                          >
+                            {activeApps.length ? (
+                              activeApps.map((app) => (
+                                <button
+                                  className="composer-app-menu-item"
+                                  key={app.id}
+                                  onClick={() => void handleSendAppEmbed(app.id)}
+                                  role="menuitem"
+                                  type="button"
+                                >
+                                  <span className="composer-app-menu-icon">
+                                    <RiApps2Line aria-hidden="true" />
+                                  </span>
+                                  <span className="composer-app-menu-copy">
+                                    <span className="composer-app-menu-name">{app.name}</span>
+                                    {app.description ? (
+                                      <span className="composer-app-menu-description">
+                                        {app.description}
+                                      </span>
+                                    ) : null}
+                                  </span>
+                                </button>
+                              ))
+                            ) : (
+                              <p className="composer-app-menu-empty">
+                                No apps in this chat yet.
+                              </p>
+                            )}
+                          </div>
+                        ) : null}
+                      </div>
+
+                      <textarea
+                        disabled={!selectedThread}
+                        onChange={(event) => setDraft(event.target.value)}
+                        onKeyDown={handleComposerKeyDown}
+                        placeholder="Send a message"
+                        rows={1}
+                        value={draft}
+                      />
+                    </div>
                     <button
                       className="primary-button composer-send"
                       disabled={!selectedThread || !draft.trim()}
@@ -1731,6 +1895,7 @@ function AppsPane({
   onBack,
   onCreateApp,
   onDeleteApp,
+  onGenerateSource,
   onOpenApp,
   onSaveApp,
   onValueChange,
@@ -1742,6 +1907,16 @@ function AppsPane({
   onBack: () => void;
   onCreateApp: () => void;
   onDeleteApp: (appId: string) => void;
+  onGenerateSource: (params: {
+    prompt: string;
+    name: string;
+    description: string;
+    currentSource: string;
+    onDelta: (accumulated: string) => void;
+  }) => Promise<{
+    source: string;
+    model: string;
+  }>;
   onOpenApp: (appId: string) => void;
   onSaveApp: (appId: string, nextValues: {
     name: string;
@@ -1749,13 +1924,15 @@ function AppsPane({
     source: string;
     value: AppJsonValue;
   }) => Promise<void>;
-  onValueChange: (appId: string, path: AppPathSegment[], value: AppJsonPrimitive) => void;
+  onValueChange: (appId: string, path: AppPathSegment[], value: AppJsonValue) => void;
   selectedApp: ThreadAppState | null;
 }) {
   const [appDetailMode, setAppDetailMode] = useState<AppDetailMode>("view");
   const [draftName, setDraftName] = useState("");
   const [draftDescription, setDraftDescription] = useState("");
   const [draftSource, setDraftSource] = useState(DEFAULT_JSON5_SOURCE);
+  const [generationPrompt, setGenerationPrompt] = useState("");
+  const [generationPending, setGenerationPending] = useState(false);
   const [feedback, setFeedback] = useState<{
     tone: "error" | "success";
     message: string;
@@ -1763,6 +1940,9 @@ function AppsPane({
 
   useEffect(() => {
     setAppDetailMode("view");
+    setGenerationPrompt("");
+    setGenerationPending(false);
+    setFeedback(null);
   }, [selectedApp?.id]);
 
   useEffect(() => {
@@ -1784,16 +1964,20 @@ function AppsPane({
   if (selectedApp) {
     const currentApp = selectedApp;
     const editing = appDetailMode === "edit";
-    const validation = validateJson5Source(draftSource);
-    const currentValue = collaborativeValue ?? {};
+    const source = editing ? draftSource : currentApp.savedSource;
+    const validation = validateJson5Source(source);
+    const currentValue = editing
+      ? validation.value ?? collaborativeValue ?? {}
+      : collaborativeValue ?? validation.value ?? {};
     const title = editing ? draftName : currentApp.name;
     const description = editing ? draftDescription : currentApp.description;
-    const source = editing ? draftSource : currentApp.savedSource;
 
     function handleStartEditing() {
       setDraftName(currentApp.name);
       setDraftDescription(currentApp.description);
       setDraftSource(currentApp.savedSource);
+      setGenerationPrompt("");
+      setGenerationPending(false);
       setFeedback(null);
       setAppDetailMode("edit");
     }
@@ -1802,6 +1986,8 @@ function AppsPane({
       setDraftName(currentApp.name);
       setDraftDescription(currentApp.description);
       setDraftSource(currentApp.savedSource);
+      setGenerationPrompt("");
+      setGenerationPending(false);
       setFeedback(null);
       setAppDetailMode("view");
     }
@@ -1832,6 +2018,56 @@ function AppsPane({
           tone: "error",
           message: error instanceof Error ? error.message : "Unable to save app."
         });
+      }
+    }
+
+    async function handleGenerateDraft() {
+      const prompt = generationPrompt.trim();
+      const previousSource = draftSource;
+      let streamedAnyContent = false;
+
+      if (!prompt) {
+        setFeedback({
+          tone: "error",
+          message: "Enter a prompt before calling the LLM."
+        });
+        return;
+      }
+
+      try {
+        setGenerationPending(true);
+        setFeedback(null);
+        setDraftSource("");
+
+        const result = await onGenerateSource({
+          prompt,
+          name: draftName,
+          description: draftDescription,
+          currentSource: draftSource,
+          onDelta: (accumulated) => {
+            streamedAnyContent = true;
+            setDraftSource(accumulated);
+          }
+        });
+
+        setDraftSource(result.source);
+        setFeedback({
+          tone: "success",
+          message: `Draft streamed in from LLM call (${result.model}).`
+        });
+      } catch (error) {
+        if (!streamedAnyContent) {
+          setDraftSource(previousSource);
+        }
+        setFeedback({
+          tone: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Unable to generate app source."
+        });
+      } finally {
+        setGenerationPending(false);
       }
     }
 
@@ -1897,6 +2133,36 @@ function AppsPane({
         </div>
 
         {editing ? (
+          <section className="panel app-generator-panel">
+            <p className="panel-copy">
+              Describe the shape you want. This only updates the local draft
+              until you save.
+            </p>
+
+            <label className="field">
+              <span>Prompt</span>
+              <textarea
+                onChange={(event) => setGenerationPrompt(event.target.value)}
+                placeholder="Generate a signup flow with name, email, role, newsletter opt-in, and a list of interests."
+                rows={4}
+                value={generationPrompt}
+              />
+            </label>
+
+            <div className="app-generator-actions">
+              <button
+                className="ghost-button app-generator-button"
+                disabled={generationPending || !generationPrompt.trim()}
+                onClick={() => void handleGenerateDraft()}
+                type="button"
+              >
+                {generationPending ? "Streaming..." : "LLM call"}
+              </button>
+            </div>
+          </section>
+        ) : null}
+
+        {editing ? (
           <section className="panel app-detail-meta-panel">
             <label className="field">
               <span>Title</span>
@@ -1925,13 +2191,14 @@ function AppsPane({
             onSourceChange={setDraftSource}
             parseError={validation.error}
             source={draftSource}
-            sourceHint="Save the JSON source to publish a new shape into the shared app."
-            value={validation.value ?? currentValue}
-            viewMode="editor"
+            sourceHint="Generate into the draft or edit it by hand, then save to publish the new shared shape."
+            value={currentValue}
+            viewMode="split"
           />
         ) : (
           <JsonValueWorkbench
-            onScalarChange={(path, value) => onValueChange(currentApp.id, path, value)}
+            onValueChange={(path, value) => onValueChange(currentApp.id, path, value)}
+            source={source}
             value={currentValue}
           />
         )}
@@ -2384,7 +2651,39 @@ function getMessagePreview(message: ChatMessage): string {
   return extractMessageText(message);
 }
 
-function renderMessage(message: ChatMessage) {
+function renderMessage(
+  message: ChatMessage,
+  options?: {
+    appLookup: Map<
+      string,
+      {
+        app: ThreadAppState;
+        snapshot: {
+          error: string | null;
+          value: AppJsonValue | null;
+        };
+      }
+    >;
+    onOpenApp: (appId: string) => void;
+    onValueChange: (appId: string, path: AppPathSegment[], value: AppJsonValue) => void;
+  }
+) {
+  const embeddedApp = readEmbeddedAppMessage(message);
+  if (embeddedApp) {
+    const entry = options?.appLookup.get(embeddedApp.appId);
+
+    return (
+      <EmbeddedAppMessage
+        app={entry?.app ?? null}
+        appError={entry?.snapshot.error ?? null}
+        appValue={entry?.snapshot.value ?? null}
+        fallbackName={embeddedApp.appName}
+        onOpenApp={options?.onOpenApp}
+        onValueChange={options?.onValueChange}
+      />
+    );
+  }
+
   const text = typeof message.message.text === "string"
     ? message.message.text
     : null;
@@ -2393,6 +2692,65 @@ function renderMessage(message: ChatMessage) {
   }
 
   return <pre>{JSON.stringify(message.message, null, 2)}</pre>;
+}
+
+function EmbeddedAppMessage({
+  app,
+  appError,
+  appValue,
+  fallbackName,
+  onOpenApp,
+  onValueChange
+}: {
+  app: ThreadAppState | null;
+  appError: string | null;
+  appValue: AppJsonValue | null;
+  fallbackName: string;
+  onOpenApp?: (appId: string) => void;
+  onValueChange?: (appId: string, path: AppPathSegment[], value: AppJsonValue) => void;
+}) {
+  const appName = app?.name || fallbackName;
+  const description = app?.description?.trim() ?? "";
+  const appUnavailable = !app || appError || appValue === null;
+
+  return (
+    <div className="message-app-embed">
+      <div className="message-app-embed-head">
+        <div className="message-app-embed-copy">
+          <span className="message-app-embed-eyebrow">Shared app</span>
+          <h4 className="message-app-embed-name">{appName}</h4>
+          {description ? (
+            <p className="message-app-embed-description">{description}</p>
+          ) : null}
+        </div>
+
+        {app ? (
+          <button
+            aria-label={`Open ${app.name}`}
+            className="ghost-button icon-button message-app-embed-open"
+            onClick={() => onOpenApp?.(app.id)}
+            title={`Open ${app.name}`}
+            type="button"
+          >
+            <RiApps2Line aria-hidden="true" />
+          </button>
+        ) : null}
+      </div>
+
+      {appUnavailable ? (
+        <p className="message-app-embed-note">
+          {appError || "This app is no longer available in this chat."}
+        </p>
+      ) : (
+        <JsonRenderSurface
+          onValueChange={(path, value) => onValueChange?.(app.id, path, value)}
+          source={app.savedSource}
+          value={appValue}
+          variant="embed"
+        />
+      )}
+    </div>
+  );
 }
 
 function groupReactions(message: ChatMessage, selfId?: string) {

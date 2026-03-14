@@ -8,7 +8,6 @@ import express from "express";
 
 import {
   type AgentKind,
-  type AppJsonPrimitive,
   type AppJsonValue,
   type AppPathSegment,
   type AiContextMessage,
@@ -42,9 +41,11 @@ import {
   answerWithContext,
   embedText,
   embedTexts,
+  generateAppSource,
   generateProfileSummary,
   generateThreadSummary,
   isAiAvailable,
+  streamAppSource,
   summarizeContext
 } from "./openai-service.js";
 import {
@@ -107,6 +108,8 @@ app.get("/", (_request, response) => {
     commands: "POST /commands",
     search: "GET /threads/:threadId/search?agentId=<agent-id>&query=<text>",
     ai: {
+      appSource: "POST /ai/app-source",
+      appSourceStream: "POST /ai/app-source/stream",
       summarize: "POST /ai/summarize",
       respond: "POST /ai/respond",
       commandDirectory: "GET /ai/command-directory",
@@ -349,6 +352,158 @@ app.post("/ai/respond", async (request, response) => {
     response.status(400).json({
       error: error instanceof Error ? error.message : "Unable to generate AI response."
     });
+  }
+});
+
+app.post("/ai/app-source", async (request, response) => {
+  if (!isAiAvailable()) {
+    response.status(503).json({ error: "OpenAI is not configured on the server." });
+    return;
+  }
+
+  const body = request.body;
+
+  if (!isRecord(body) || typeof body.prompt !== "string" || !body.prompt.trim()) {
+    response.status(400).json({ error: "prompt is required." });
+    return;
+  }
+
+  try {
+    const prompt = body.prompt.trim();
+    const threadId =
+      typeof body.threadId === "string" && body.threadId.trim()
+        ? body.threadId
+        : null;
+    const agentId =
+      typeof body.agentId === "string" && body.agentId.trim()
+        ? body.agentId
+        : null;
+    let thread: ChatThread | null = null;
+    let threadLabel: string | null = null;
+    let contextMessages: AiContextMessage[] = [];
+
+    if (threadId) {
+      if (!agentId) {
+        response.status(400).json({ error: "agentId is required with threadId." });
+        return;
+      }
+
+      thread = getThreadForAgent(threadId, agentId);
+      threadLabel = getThreadLabel(thread, agentId);
+      contextMessages = buildThreadContextMessages(thread.id).slice(
+        -Math.min(env.aiContextMessageLimit, 12)
+      );
+    }
+
+    const result = await generateAppSource({
+      prompt,
+      appName: typeof body.name === "string" ? body.name : null,
+      appDescription: typeof body.description === "string" ? body.description : null,
+      currentSource: typeof body.currentSource === "string" ? body.currentSource : null,
+      threadLabel,
+      messages: contextMessages
+    });
+
+    response.status(200).json({
+      prompt,
+      source: result.source,
+      model: result.model,
+      generatedAt: new Date().toISOString(),
+      threadId: thread?.id ?? null
+    });
+  } catch (error) {
+    response.status(400).json({
+      error:
+        error instanceof Error
+          ? error.message
+          : "Unable to generate app source."
+    });
+  }
+});
+
+app.post("/ai/app-source/stream", async (request, response) => {
+  if (!isAiAvailable()) {
+    response.status(503).json({ error: "OpenAI is not configured on the server." });
+    return;
+  }
+
+  const body = request.body;
+
+  if (!isRecord(body) || typeof body.prompt !== "string" || !body.prompt.trim()) {
+    response.status(400).json({ error: "prompt is required." });
+    return;
+  }
+
+  const prompt = body.prompt.trim();
+  const threadId =
+    typeof body.threadId === "string" && body.threadId.trim()
+      ? body.threadId
+      : null;
+  const agentId =
+    typeof body.agentId === "string" && body.agentId.trim()
+      ? body.agentId
+      : null;
+  let thread: ChatThread | null = null;
+  let threadLabel: string | null = null;
+  let contextMessages: AiContextMessage[] = [];
+
+  if (threadId) {
+    if (!agentId) {
+      response.status(400).json({ error: "agentId is required with threadId." });
+      return;
+    }
+
+    try {
+      thread = getThreadForAgent(threadId, agentId);
+      threadLabel = getThreadLabel(thread, agentId);
+      contextMessages = buildThreadContextMessages(thread.id).slice(
+        -Math.min(env.aiContextMessageLimit, 12)
+      );
+    } catch (error) {
+      response.status(400).json({
+        error: error instanceof Error ? error.message : "Unable to load thread context."
+      });
+      return;
+    }
+  }
+
+  response.setHeader("Content-Type", "text/event-stream");
+  response.setHeader("Cache-Control", "no-cache, no-transform");
+  response.setHeader("Connection", "keep-alive");
+  response.setHeader("X-Accel-Buffering", "no");
+  response.flushHeaders();
+
+  try {
+    const result = await streamAppSource(
+      {
+        prompt,
+        appName: typeof body.name === "string" ? body.name : null,
+        appDescription: typeof body.description === "string" ? body.description : null,
+        currentSource: typeof body.currentSource === "string" ? body.currentSource : null,
+        threadLabel,
+        messages: contextMessages
+      },
+      (delta) => {
+        sendEvent(response, "delta", { delta });
+      }
+    );
+
+    sendEvent(response, "done", {
+      prompt,
+      source: result.source,
+      model: result.model,
+      generatedAt: new Date().toISOString(),
+      threadId: thread?.id ?? null
+    });
+  } catch (error) {
+    sendEvent(response, "error", {
+      error:
+        error instanceof Error
+          ? error.message
+          : "Unable to stream app source."
+    });
+  } finally {
+    response.end();
   }
 });
 
@@ -604,10 +759,7 @@ function parseCommand(value: unknown): ChatCommand | null {
         value.path.some(
           (segment) => typeof segment !== "string" && typeof segment !== "number"
         ) ||
-        (value.value !== null &&
-          typeof value.value !== "string" &&
-          typeof value.value !== "number" &&
-          typeof value.value !== "boolean")
+        !isAppJsonValue(value.value)
       ) {
         return null;
       }
@@ -1066,11 +1218,11 @@ function decodeThreadAppDocument(encoded: string): Automerge.Doc<ThreadAppDocume
 function updateThreadAppDocument(
   document: Automerge.Doc<ThreadAppDocument>,
   path: AppPathSegment[],
-  nextValue: AppJsonPrimitive
+  nextValue: AppJsonValue
 ): Automerge.Doc<ThreadAppDocument> {
   return Automerge.change(document, (draft) => {
     if (path.length === 0) {
-      draft.value = nextValue;
+      draft.value = cloneAppJsonValue(nextValue);
       return;
     }
 
@@ -1078,18 +1230,33 @@ function updateThreadAppDocument(
 
     for (let index = 0; index < path.length - 1; index += 1) {
       const segment = path[index]!;
+      const nextSegment = path[index + 1]!;
 
       if (typeof segment === "number") {
-        if (!Array.isArray(target) || segment < 0 || segment >= target.length) {
+        if (!Array.isArray(target) || segment < 0) {
           throw new Error("Invalid app field path.");
+        }
+
+        if (
+          target[segment] === undefined ||
+          (!Array.isArray(target[segment]) && !isRecord(target[segment]))
+        ) {
+          target[segment] = typeof nextSegment === "number" ? [] : {};
         }
 
         target = target[segment];
         continue;
       }
 
-      if (!isRecord(target) || !(segment in target)) {
+      if (!isRecord(target)) {
         throw new Error("Invalid app field path.");
+      }
+
+      if (
+        !(segment in target) ||
+        (!Array.isArray(target[segment]) && !isRecord(target[segment]))
+      ) {
+        target[segment] = typeof nextSegment === "number" ? [] : {};
       }
 
       target = target[segment];
@@ -1098,29 +1265,19 @@ function updateThreadAppDocument(
     const lastSegment = path[path.length - 1]!;
 
     if (typeof lastSegment === "number") {
-      if (!Array.isArray(target) || lastSegment < 0 || lastSegment >= target.length) {
+      if (!Array.isArray(target) || lastSegment < 0) {
         throw new Error("Invalid app field path.");
       }
 
-      const currentValue = target[lastSegment];
-      if (typeof currentValue === "object" && currentValue !== null) {
-        throw new Error("Only scalar app fields can be updated.");
-      }
-
-      target[lastSegment] = nextValue;
+      target[lastSegment] = cloneAppJsonValue(nextValue);
       return;
     }
 
-    if (!isRecord(target) || !(lastSegment in target)) {
+    if (!isRecord(target)) {
       throw new Error("Invalid app field path.");
     }
 
-    const currentValue = target[lastSegment];
-    if (typeof currentValue === "object" && currentValue !== null) {
-      throw new Error("Only scalar app fields can be updated.");
-    }
-
-    target[lastSegment] = nextValue;
+    target[lastSegment] = cloneAppJsonValue(nextValue);
   });
 }
 

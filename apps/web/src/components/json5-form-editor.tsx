@@ -1,33 +1,215 @@
 "use client";
 
-import type { Dispatch, ReactNode, SetStateAction } from "react";
-import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { defineCatalog, type Spec } from "@json-render/core";
+import { defineRegistry, JSONUIProvider, Renderer } from "@json-render/react";
+import { schema } from "@json-render/react/schema";
+import { shadcnComponents } from "@json-render/shadcn";
+import { shadcnComponentDefinitions } from "@json-render/shadcn/catalog";
 import JSON5 from "json5";
+import { RiDeleteBinLine } from "react-icons/ri";
+import { z } from "zod";
 
 import {
-  type AppJsonPrimitive,
+  type AppJsonObject,
   type AppJsonValue,
   type AppPathSegment,
-  isAppJsonValue
+  collectStreamingJsonCandidates,
+  isAppJsonValue,
+  looksLikeJsonRenderSpec,
+  validateJsonRenderSpecShape
 } from "@social/shared";
 
 import styles from "./json5-form-editor.module.css";
 
-type JsonArray = AppJsonValue[];
-type JsonObject = { [key: string]: AppJsonValue };
-type ScalarInputValue = string | boolean | null;
-type ScalarState = Record<string, ScalarInputValue>;
 type Json5EditorViewMode = "split" | "editor" | "form";
+type Json5SourceValidation = {
+  error: string | null;
+  mode: "legacy" | "spec";
+  recovered: boolean;
+  spec: Spec | null;
+  value: AppJsonValue | null;
+};
 
-export const DEFAULT_JSON5_SOURCE = `{}`;
+const ROOT_STATE_SEGMENT = "root";
+const ROOT_STATE_PATH = `/${ROOT_STATE_SEGMENT}`;
 
-const INITIAL_SCHEMA = parseJson5(DEFAULT_JSON5_SOURCE);
+const customComponentDefinitions = {
+  IconButton: {
+    props: z.object({
+      icon: z.enum(["trash"]),
+      label: z.string(),
+      variant: z.enum(["ghost", "danger"]).nullable(),
+      disabled: z.boolean().nullable()
+    }),
+    events: ["press"],
+    description: "Compact icon-only button for row actions such as delete.",
+    example: {
+      icon: "trash",
+      label: "Delete item",
+      variant: "danger"
+    }
+  }
+} as const;
+
+const jsonRenderCatalog = defineCatalog(schema, {
+  components: {
+    ...shadcnComponentDefinitions,
+    ...customComponentDefinitions
+  },
+  actions: {}
+});
+
+const { registry } = defineRegistry(jsonRenderCatalog, {
+  components: {
+    ...shadcnComponents,
+    IconButton: ({ props, emit }) => {
+      const variantClassName =
+        props.variant === "danger"
+          ? "border-red-500/25 bg-red-500/10 text-red-100 hover:bg-red-500/18 hover:text-white"
+          : "border-white/10 bg-white/5 text-[rgba(239,236,230,0.76)] hover:bg-white/10 hover:text-white";
+
+      return (
+        <button
+          aria-label={props.label}
+          className={[
+            "inline-flex size-9 shrink-0 items-center justify-center rounded-full border transition-colors outline-none",
+            "focus-visible:ring-2 focus-visible:ring-white/20 disabled:pointer-events-none disabled:opacity-50",
+            variantClassName
+          ].join(" ")}
+          disabled={props.disabled ?? false}
+          onClick={() => emit("press")}
+          title={props.label}
+          type="button"
+        >
+          <RiDeleteBinLine aria-hidden="true" className="text-base" />
+        </button>
+      );
+    }
+  }
+});
+
+const DEFAULT_JSON_RENDER_SPEC: Spec = {
+  root: "card",
+  state: {
+    form: {
+      name: "",
+      email: "",
+      message: ""
+    }
+  },
+  elements: {
+    card: {
+      type: "Card",
+      props: {
+        title: "Contact Us",
+        description: "Send us a message.",
+        maxWidth: "md",
+        centered: false
+      },
+      children: ["stack"]
+    },
+    stack: {
+      type: "Stack",
+      props: {
+        direction: "vertical",
+        gap: "md",
+        align: "stretch",
+        justify: "start"
+      },
+      children: ["name", "email", "message", "submit"]
+    },
+    name: {
+      type: "Input",
+      props: {
+        label: "Name",
+        name: "name",
+        type: "text",
+        placeholder: "Jane Doe",
+        value: {
+          $bindState: "/form/name"
+        },
+        validateOn: "blur",
+        checks: [
+          {
+            type: "required",
+            message: "Name is required"
+          }
+        ],
+        disabled: false
+      }
+    },
+    email: {
+      type: "Input",
+      props: {
+        label: "Email",
+        name: "email",
+        type: "email",
+        placeholder: "jane@example.com",
+        value: {
+          $bindState: "/form/email"
+        },
+        validateOn: "blur",
+        checks: [
+          {
+            type: "required",
+            message: "Email is required"
+          },
+          {
+            type: "email",
+            message: "Please enter a valid email"
+          }
+        ],
+        disabled: false
+      }
+    },
+    message: {
+      type: "Textarea",
+      props: {
+        label: "Message",
+        name: "message",
+        placeholder: "Tell us what you need.",
+        rows: 5,
+        value: {
+          $bindState: "/form/message"
+        },
+        validateOn: "blur",
+        checks: [
+          {
+            type: "required",
+            message: "Message is required"
+          }
+        ],
+        disabled: false
+      }
+    },
+    submit: {
+      type: "Button",
+      props: {
+        label: "Send Message",
+        variant: "primary",
+        disabled: false
+      },
+      on: {
+        press: {
+          action: "validateForm",
+          params: {
+            statePath: "/formValidation"
+          }
+        }
+      }
+    }
+  }
+};
+
+export const DEFAULT_JSON5_SOURCE = JSON.stringify(DEFAULT_JSON_RENDER_SPEC, null, 2);
 
 type Json5WorkbenchProps = {
   actions?: ReactNode;
   compact?: boolean;
-  onScalarChange?: (path: AppPathSegment[], value: AppJsonPrimitive) => void;
   onSourceChange: (source: string) => void;
+  onValueChange?: (path: AppPathSegment[], value: AppJsonValue) => void;
   parseError?: string | null;
   source: string;
   sourceHint?: string;
@@ -48,38 +230,25 @@ export function Json5FormEditor({
   onSourceChange,
   viewMode = "split"
 }: Json5FormEditorProps) {
-  const [schema, setSchema] = useState<AppJsonValue>(INITIAL_SCHEMA);
-  const [scalarState, setScalarState] = useState<ScalarState>(() =>
-    collectScalarDefaults(INITIAL_SCHEMA)
+  const validation = useMemo(() => validateJson5Source(source), [source]);
+  const [previewValue, setPreviewValue] = useState<AppJsonValue>(
+    validation.value ?? {}
   );
-  const [parseError, setParseError] = useState<string | null>(null);
 
   useEffect(() => {
-    try {
-      const nextSchema = parseJson5(source);
-      setSchema(nextSchema);
-      setScalarState(collectScalarDefaults(nextSchema));
-      setParseError(null);
-    } catch (error) {
-      setParseError(getErrorMessage(error));
-    }
-  }, [source]);
-
-  const formValue = materializeValue(schema, [], scalarState);
+    setPreviewValue(validation.value !== null ? cloneAppJsonValue(validation.value) : {});
+  }, [source, validation.value]);
 
   return (
     <Json5Workbench
       compact={compact}
-      onScalarChange={(path, value) => {
-        setScalarState((current) => ({
-          ...current,
-          [toPathKey(path)]: typeof value === "number" ? String(value) : value
-        }));
-      }}
       onSourceChange={onSourceChange}
-      parseError={parseError}
+      onValueChange={(path, value) => {
+        setPreviewValue((current) => applyAppValueAtPath(current, path, value));
+      }}
+      parseError={validation.error}
       source={source}
-      value={formValue}
+      value={previewValue}
       viewMode={viewMode}
     />
   );
@@ -88,8 +257,8 @@ export function Json5FormEditor({
 export function Json5Workbench({
   actions,
   compact = false,
-  onScalarChange,
   onSourceChange,
+  onValueChange,
   parseError = null,
   source,
   sourceHint,
@@ -115,7 +284,11 @@ export function Json5Workbench({
         />
       ) : null}
       {showWorkbench ? (
-        <JsonValueWorkbench onScalarChange={onScalarChange} value={value} />
+        <JsonValueWorkbench
+          onValueChange={onValueChange}
+          source={source}
+          value={value}
+        />
       ) : null}
     </div>
   );
@@ -145,12 +318,13 @@ export function Json5SourceEditorPanel({
           className={parseError ? styles.statusError : styles.statusOk}
           role="status"
         >
-          {parseError ? "Parse error" : "Live"}
+          {parseError ? "Invalid" : "Live"}
         </span>
       </div>
 
       <p className={styles.panelCopy}>
-        Comments, single quotes, unquoted keys, and trailing commas all work here.
+        Write a `json-render` spec here. JSON5 features like comments, single
+        quotes, and trailing commas are supported.
       </p>
 
       <textarea
@@ -166,12 +340,13 @@ export function Json5SourceEditorPanel({
           <>
             <p className={styles.errorText}>{parseError}</p>
             <p className={styles.statusHint}>
-              Fix the source before saving it into the collaborative app state.
+              Fix the source before saving it into the shared app.
             </p>
           </>
         ) : (
           <p className={styles.statusHint}>
-            {sourceHint ?? "Edit the generated form on the right without changing the source."}
+            {sourceHint ??
+              "Edit the spec here or use the live render to exercise its state on the right."}
           </p>
         )}
       </div>
@@ -182,30 +357,42 @@ export function Json5SourceEditorPanel({
 }
 
 export function JsonValueWorkbench({
-  onScalarChange,
+  onValueChange,
+  source,
   value
 }: {
-  onScalarChange?: (path: AppPathSegment[], value: AppJsonPrimitive) => void;
+  onValueChange?: (path: AppPathSegment[], value: AppJsonValue) => void;
+  source: string;
   value: AppJsonValue;
 }) {
+  const surface = useResolvedJsonRenderSurface(source, value);
+
   return (
     <div className={styles.rightRail}>
       <section className={styles.panel}>
         <div className={styles.panelHeader}>
           <div>
             <p className={styles.panelEyebrow}>Render</p>
-            <h2 className={styles.panelTitle}>Generated form</h2>
+            <h2 className={styles.panelTitle}>Live UI</h2>
           </div>
+          <span className={styles.modeBadge}>
+            {surface.validation.mode === "spec" ? "json-render" : "legacy"}
+          </span>
         </div>
 
+        {surface.validation.mode === "legacy" && !surface.validation.error ? (
+          <p className={styles.panelCopy}>
+            Legacy JSON source detected. Rendering it in compatibility mode.
+          </p>
+        ) : null}
+
         <div className={styles.formSurface}>
-          <RenderedJsonField
-            depth={0}
-            isRoot
-            label="Root"
-            onScalarChange={onScalarChange}
-            path={[]}
-            value={value}
+          <JsonRenderSurfaceBody
+            initialState={surface.initialState}
+            onValueChange={onValueChange}
+            providerKey={surface.providerKey}
+            renderSpec={surface.renderSpec}
+            validation={surface.validation}
           />
         </div>
       </section>
@@ -213,18 +400,180 @@ export function JsonValueWorkbench({
   );
 }
 
-export function validateJson5Source(source: string): {
-  error: string | null;
-  value: AppJsonValue | null;
+export function JsonRenderSurface({
+  onValueChange,
+  source,
+  value,
+  variant = "panel"
+}: {
+  onValueChange?: (path: AppPathSegment[], value: AppJsonValue) => void;
+  source: string;
+  value: AppJsonValue;
+  variant?: "panel" | "embed";
+}) {
+  const surface = useResolvedJsonRenderSurface(source, value);
+
+  return (
+    <JsonRenderSurfaceBody
+      initialState={surface.initialState}
+      onValueChange={onValueChange}
+      providerKey={surface.providerKey}
+      renderSpec={surface.renderSpec}
+      validation={surface.validation}
+      variant={variant}
+    />
+  );
+}
+
+function useResolvedJsonRenderSurface(
+  source: string,
+  value: AppJsonValue
+): {
+  initialState: AppJsonObject;
+  providerKey: string;
+  renderSpec: Spec | null;
+  validation: Json5SourceValidation;
 } {
+  const validation = useMemo(() => validateJson5Source(source), [source]);
+
+  const renderSpec = useMemo(() => {
+    if (validation.error) {
+      return null;
+    }
+
+    if (validation.mode === "legacy") {
+      return buildLegacyRenderSpec(value);
+    }
+
+    return validation.spec;
+  }, [validation, value]);
+
+  const initialState = useMemo<AppJsonObject>(() => {
+    if (validation.mode === "legacy") {
+      return {
+        [ROOT_STATE_SEGMENT]: cloneAppJsonValue(value)
+      };
+    }
+
+    return isJsonObject(value) ? (cloneAppJsonValue(value) as AppJsonObject) : {};
+  }, [validation.mode, value]);
+
+  const providerKey = useMemo(
+    () => `${validation.mode}:${source}`,
+    [validation.mode, source]
+  );
+
+  return {
+    initialState,
+    providerKey,
+    renderSpec,
+    validation
+  };
+}
+
+function JsonRenderSurfaceBody({
+  initialState,
+  onValueChange,
+  providerKey,
+  renderSpec,
+  validation,
+  variant = "panel"
+}: {
+  initialState: AppJsonObject;
+  onValueChange?: (path: AppPathSegment[], value: AppJsonValue) => void;
+  providerKey: string;
+  renderSpec: Spec | null;
+  validation: Json5SourceValidation;
+  variant?: "panel" | "embed";
+}) {
+  if (!renderSpec) {
+    return (
+      <div
+        className={`${styles.renderSurfaceFallback} ${
+          variant === "embed" ? styles.renderSurfaceFallbackEmbed : ""
+        }`}
+      >
+        <p className={styles.errorText}>
+          {validation.error ?? "Unable to render this source."}
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {variant === "panel" && validation.recovered && validation.error ? (
+        <p className={styles.statusHint}>
+          Streaming preview repaired unfinished JSON in memory. The raw source is
+          still incomplete.
+        </p>
+      ) : null}
+      <div
+        className={`${styles.renderCanvas} ${
+          variant === "embed" ? styles.renderCanvasEmbed : ""
+        } json-render-theme`}
+      >
+        <JSONUIProvider
+          initialState={initialState}
+          key={providerKey}
+          onStateChange={(changes) => {
+            for (const change of changes) {
+              const nextPath =
+                validation.mode === "legacy"
+                  ? fromLegacyStatePath(change.path)
+                  : fromJsonPointer(change.path);
+
+              if (!nextPath || change.value === undefined || !isAppJsonValue(change.value)) {
+                continue;
+              }
+
+              onValueChange?.(nextPath, change.value);
+            }
+          }}
+          registry={registry}
+        >
+          <Renderer registry={registry} spec={renderSpec} />
+        </JSONUIProvider>
+      </div>
+    </>
+  );
+}
+
+export function validateJson5Source(source: string): Json5SourceValidation {
   try {
     return {
-      error: null,
-      value: parseJson5(source)
+      ...validateParsedSource(parseJson5(source)),
+      recovered: false
     };
   } catch (error) {
+    const rawError = getErrorMessage(error);
+    const sourceLooksLikeSpec = /(^|[\s{,])["']?(root|elements|state)["']?\s*:/.test(
+      source
+    );
+
+    for (const candidate of collectStreamingJsonCandidates(source)) {
+      try {
+        const recovered = validateParsedSource(parseJson5(candidate));
+
+        if (sourceLooksLikeSpec && recovered.mode !== "spec") {
+          continue;
+        }
+
+        return {
+          ...recovered,
+          error: rawError,
+          recovered: true
+        };
+      } catch {
+        continue;
+      }
+    }
+
     return {
-      error: getErrorMessage(error),
+      error: rawError,
+      mode: "legacy",
+      recovered: false,
+      spec: null,
       value: null
     };
   }
@@ -232,534 +581,291 @@ export function validateJson5Source(source: string): {
 
 export function summarizeJson5Shape(source: string): string {
   try {
-    return describeJsonValue(parseJson5(source));
+    const validation = validateParsedSource(parseJson5(source));
+
+    if (validation.mode === "spec") {
+      return "json-render spec";
+    }
+
+    return describeJsonValue(validation.value ?? {});
   } catch {
-    return "Invalid JSON5 shape";
+    return "Invalid JSON5 source";
   }
 }
 
-type JsonFieldProps = {
-  depth: number;
-  isRoot?: boolean;
-  label: string;
-  path: AppPathSegment[];
-  scalarState: ScalarState;
-  setScalarState: Dispatch<SetStateAction<ScalarState>>;
-  value: AppJsonValue;
-};
-
-function JsonField({
-  depth,
-  isRoot = false,
-  label,
-  path,
-  scalarState,
-  setScalarState,
-  value
-}: JsonFieldProps) {
-  if (Array.isArray(value)) {
-    return (
-      <ArrayField
-        depth={depth}
-        isRoot={isRoot}
-        label={label}
-        path={path}
-        scalarState={scalarState}
-        setScalarState={setScalarState}
-        value={value}
-      />
-    );
+function validateParsedSource(value: AppJsonValue): Json5SourceValidation {
+  if (!looksLikeJsonRenderSpec(value)) {
+    return {
+      error: null,
+      mode: "legacy",
+      recovered: false,
+      spec: buildLegacyRenderSpec(value),
+      value
+    };
   }
 
-  if (isJsonObject(value)) {
-    return (
-      <ObjectField
-        depth={depth}
-        isRoot={isRoot}
-        label={label}
-        path={path}
-        scalarState={scalarState}
-        setScalarState={setScalarState}
-        value={value}
-      />
-    );
+  const validation = validateJsonRenderSpecShape(value);
+  if (!validation.valid) {
+    return {
+      error: validation.issues.join(" "),
+      mode: "spec",
+      recovered: false,
+      spec: null,
+      value: null
+    };
   }
 
-  return (
-    <ScalarField
-      label={label}
-      path={path}
-      scalarState={scalarState}
-      setScalarState={setScalarState}
-      value={value}
-    />
-  );
+  if (!isJsonObject(value)) {
+    return {
+      error: "Spec must be a JSON object.",
+      mode: "spec",
+      recovered: false,
+      spec: null,
+      value: null
+    };
+  }
+
+  const stateValue = value.state;
+  if (stateValue !== undefined && !isJsonObject(stateValue)) {
+    return {
+      error: 'Spec field "state" must be an object when present.',
+      mode: "spec",
+      recovered: false,
+      spec: null,
+      value: null
+    };
+  }
+
+  return {
+    error: null,
+    mode: "spec",
+    recovered: false,
+    spec: value as unknown as Spec,
+    value: isJsonObject(stateValue) ? stateValue : {}
+  };
 }
 
-type ObjectFieldProps = Omit<JsonFieldProps, "value"> & {
-  value: JsonObject;
-};
+function buildLegacyRenderSpec(value: AppJsonValue): Spec {
+  const elements: Spec["elements"] = {};
+  let nextElementId = 0;
 
-function ObjectField({
-  depth,
-  isRoot = false,
-  label,
-  path,
-  scalarState,
-  setScalarState,
-  value
-}: ObjectFieldProps) {
-  const entries = Object.entries(value);
+  function addElement(
+    type: string,
+    props: Record<string, unknown>,
+    children?: string[]
+  ): string {
+    const elementId = `legacy-${nextElementId++}`;
+    elements[elementId] = children ? { type, props, children } : { type, props };
+    return elementId;
+  }
 
-  return (
-    <section
-      className={isRoot ? styles.objectRoot : styles.objectCard}
-      data-depth={depth}
-    >
-      {!isRoot ? (
-        <div className={styles.fieldMeta}>
-          <span className={styles.fieldLabel}>{label}</span>
-          <span className={styles.fieldType}>object</span>
-        </div>
-      ) : null}
+  function addText(text: string, variant: "body" | "muted" = "body"): string {
+    return addElement("Text", {
+      text,
+      variant
+    });
+  }
 
-      {entries.length === 0 ? (
-        <div className={styles.emptyState}>Empty object</div>
-      ) : (
-        <div className={styles.objectGrid}>
-          {entries.map(([key, childValue]) => (
-            <JsonField
-              depth={depth + 1}
-              key={toPathKey([...path, key])}
-              label={key}
-              path={[...path, key]}
-              scalarState={scalarState}
-              setScalarState={setScalarState}
-              value={childValue}
-            />
-          ))}
-        </div>
-      )}
-    </section>
-  );
+  function buildField(
+    currentValue: AppJsonValue,
+    label: string,
+    path: AppPathSegment[]
+  ): string {
+    if (Array.isArray(currentValue)) {
+      const children = currentValue.map((childValue, index) =>
+        buildField(childValue, `[${index}]`, [...path, index])
+      );
+
+      return addElement(
+        "Card",
+        {
+          title: label,
+          description: currentValue.length ? "List" : "Empty list",
+          maxWidth: "full",
+          centered: false
+        },
+        [
+          addElement(
+            "Stack",
+            {
+              direction: "vertical",
+              gap: "md",
+              align: "stretch",
+              justify: "start"
+            },
+            children.length ? children : [addText("Empty list", "muted")]
+          )
+        ]
+      );
+    }
+
+    if (isJsonObject(currentValue)) {
+      const entries = Object.entries(currentValue);
+      const children = entries.map(([key, childValue]) =>
+        buildField(childValue, key, [...path, key])
+      );
+
+      return addElement(
+        "Card",
+        {
+          title: label,
+          description: entries.length ? "Object" : "Empty object",
+          maxWidth: "full",
+          centered: false
+        },
+        [
+          addElement(
+            "Stack",
+            {
+              direction: "vertical",
+              gap: "md",
+              align: "stretch",
+              justify: "start"
+            },
+            children.length ? children : [addText("Empty object", "muted")]
+          )
+        ]
+      );
+    }
+
+    const statePath = toLegacyStatePath(path);
+    const fieldName = path.length ? toPathKey(path) : "root";
+
+    if (typeof currentValue === "string") {
+      return addElement("Input", {
+        label,
+        name: fieldName,
+        type: "text",
+        value: { $bindState: statePath },
+        disabled: false
+      });
+    }
+
+    if (typeof currentValue === "number") {
+      return addElement("Input", {
+        label,
+        name: fieldName,
+        type: "number",
+        value: { $bindState: statePath },
+        disabled: false
+      });
+    }
+
+    if (typeof currentValue === "boolean") {
+      return addElement("Switch", {
+        label,
+        name: fieldName,
+        checked: { $bindState: statePath },
+        disabled: false
+      });
+    }
+
+    return addText(`${label}: null`, "muted");
+  }
+
+  const rootChildren =
+    Array.isArray(value)
+      ? value.length
+        ? value.map((childValue, index) => buildField(childValue, `[${index}]`, [index]))
+        : [addText("Empty list", "muted")]
+      : isJsonObject(value)
+        ? Object.entries(value).length
+          ? Object.entries(value).map(([key, childValue]) =>
+              buildField(childValue, key, [key])
+            )
+          : [addText("Empty object", "muted")]
+        : [buildField(value, "Root", [])];
+
+  const root = addElement("Stack", {
+    direction: "vertical",
+    gap: "md",
+    align: "stretch",
+    justify: "start"
+  }, rootChildren);
+
+  return {
+    root,
+    elements
+  };
 }
 
-type ArrayFieldProps = Omit<JsonFieldProps, "value"> & {
-  value: JsonArray;
-};
-
-function ArrayField({
-  depth,
-  isRoot = false,
-  label,
-  path,
-  scalarState,
-  setScalarState,
-  value
-}: ArrayFieldProps) {
-  return (
-    <section
-      className={isRoot ? styles.objectRoot : styles.objectCard}
-      data-depth={depth}
-    >
-      <div className={styles.fieldMeta}>
-        <span className={styles.fieldLabel}>{isRoot ? "Root" : label}</span>
-        <span className={styles.fieldType}>list</span>
-      </div>
-
-      {value.length === 0 ? (
-        <div className={styles.emptyState}>Empty list</div>
-      ) : (
-        <div className={styles.objectGrid}>
-          {value.map((childValue, index) => (
-            <JsonField
-              depth={depth + 1}
-              key={toPathKey([...path, index])}
-              label={`[${index}]`}
-              path={[...path, index]}
-              scalarState={scalarState}
-              setScalarState={setScalarState}
-              value={childValue}
-            />
-          ))}
-        </div>
-      )}
-    </section>
-  );
-}
-
-type ScalarFieldProps = {
-  label: string;
-  path: AppPathSegment[];
-  scalarState: ScalarState;
-  setScalarState: Dispatch<SetStateAction<ScalarState>>;
-  value: AppJsonPrimitive;
-};
-
-function ScalarField({
-  label,
-  path,
-  scalarState,
-  setScalarState,
-  value
-}: ScalarFieldProps) {
-  const fieldKey = toPathKey(path);
-
-  if (typeof value === "boolean") {
-    const currentValue =
-      typeof scalarState[fieldKey] === "boolean" ? Boolean(scalarState[fieldKey]) : value;
-
-    return (
-      <section className={styles.fieldCard}>
-        <div className={styles.fieldMeta}>
-          <span className={styles.fieldLabel}>{label}</span>
-          <span className={styles.fieldType}>boolean</span>
-        </div>
-
-        <button
-          aria-checked={currentValue}
-          className={`${styles.switch} ${currentValue ? styles.switchActive : ""}`}
-          onClick={() => {
-            setScalarState((current) => ({
-              ...current,
-              [fieldKey]: !currentValue
-            }));
-          }}
-          role="switch"
-          type="button"
-        >
-          <span className={styles.switchTrack}>
-            <span className={styles.switchThumb} />
-          </span>
-          <span className={styles.switchLabel}>
-            {currentValue ? "Enabled" : "Disabled"}
-          </span>
-        </button>
-      </section>
-    );
-  }
-
-  if (typeof value === "number") {
-    const currentValue =
-      typeof scalarState[fieldKey] === "string" ? scalarState[fieldKey] : String(value);
-
-    return (
-      <section className={styles.fieldCard}>
-        <div className={styles.fieldMeta}>
-          <span className={styles.fieldLabel}>{label}</span>
-          <span className={styles.fieldType}>number</span>
-        </div>
-
-        <label className={styles.controlStack}>
-          <span className={styles.helperText}>Numeric input</span>
-          <input
-            className={styles.input}
-            inputMode="decimal"
-            onChange={(event) => {
-              setScalarState((current) => ({
-                ...current,
-                [fieldKey]: event.currentTarget.value
-              }));
-            }}
-            type="text"
-            value={currentValue}
-          />
-        </label>
-      </section>
-    );
-  }
-
-  if (typeof value === "string") {
-    const currentValue =
-      typeof scalarState[fieldKey] === "string" ? scalarState[fieldKey] : value;
-
-    return (
-      <section className={styles.fieldCard}>
-        <div className={styles.fieldMeta}>
-          <span className={styles.fieldLabel}>{label}</span>
-          <span className={styles.fieldType}>string</span>
-        </div>
-
-        <label className={styles.controlStack}>
-          <span className={styles.helperText}>Text input</span>
-          <input
-            className={styles.input}
-            onChange={(event) => {
-              setScalarState((current) => ({
-                ...current,
-                [fieldKey]: event.currentTarget.value
-              }));
-            }}
-            type="text"
-            value={currentValue}
-          />
-        </label>
-      </section>
-    );
-  }
-
-  return (
-    <section className={styles.fieldCard}>
-      <div className={styles.fieldMeta}>
-        <span className={styles.fieldLabel}>{label}</span>
-        <span className={styles.fieldType}>null</span>
-      </div>
-
-      <div className={styles.nullBadge}>Null values render as read-only markers.</div>
-    </section>
-  );
-}
-
-type RenderedJsonFieldProps = {
-  depth: number;
-  isRoot?: boolean;
-  label: string;
-  onScalarChange?: (path: AppPathSegment[], value: AppJsonPrimitive) => void;
-  path: AppPathSegment[];
-  value: AppJsonValue;
-};
-
-function RenderedJsonField({
-  depth,
-  isRoot = false,
-  label,
-  onScalarChange,
-  path,
-  value
-}: RenderedJsonFieldProps) {
-  if (Array.isArray(value)) {
-    return (
-      <section
-        className={isRoot ? styles.objectRoot : styles.objectCard}
-        data-depth={depth}
-      >
-        <div className={styles.fieldMeta}>
-          <span className={styles.fieldLabel}>{isRoot ? "Root" : label}</span>
-          <span className={styles.fieldType}>list</span>
-        </div>
-
-        {value.length === 0 ? (
-          <div className={styles.emptyState}>Empty list</div>
-        ) : (
-          <div className={styles.objectGrid}>
-            {value.map((childValue, index) => (
-              <RenderedJsonField
-                depth={depth + 1}
-                isRoot={false}
-                key={toPathKey([...path, index])}
-                label={`[${index}]`}
-                onScalarChange={onScalarChange}
-                path={[...path, index]}
-                value={childValue}
-              />
-            ))}
-          </div>
-        )}
-      </section>
-    );
-  }
-
-  if (isJsonObject(value)) {
-    const entries = Object.entries(value);
-
-    return (
-      <section
-        className={isRoot ? styles.objectRoot : styles.objectCard}
-        data-depth={depth}
-      >
-        {!isRoot ? (
-          <div className={styles.fieldMeta}>
-            <span className={styles.fieldLabel}>{label}</span>
-            <span className={styles.fieldType}>object</span>
-          </div>
-        ) : null}
-
-        {entries.length === 0 ? (
-          <div className={styles.emptyState}>Empty object</div>
-        ) : (
-          <div className={styles.objectGrid}>
-            {entries.map(([key, childValue]) => (
-              <RenderedJsonField
-                depth={depth + 1}
-                key={toPathKey([...path, key])}
-                label={key}
-                onScalarChange={onScalarChange}
-                path={[...path, key]}
-                value={childValue}
-              />
-            ))}
-          </div>
-        )}
-      </section>
-    );
-  }
-
-  return (
-    <RenderedScalarField
-      label={label}
-      onScalarChange={onScalarChange}
-      path={path}
-      value={value}
-    />
-  );
-}
-
-function RenderedScalarField({
-  label,
-  onScalarChange,
-  path,
-  value
-}: {
-  label: string;
-  onScalarChange?: (path: AppPathSegment[], value: AppJsonPrimitive) => void;
-  path: AppPathSegment[];
-  value: AppJsonPrimitive;
-}) {
-  if (typeof value === "boolean") {
-    return (
-      <section className={styles.fieldCard}>
-        <div className={styles.fieldMeta}>
-          <span className={styles.fieldLabel}>{label}</span>
-          <span className={styles.fieldType}>boolean</span>
-        </div>
-
-        <button
-          aria-checked={value}
-          className={`${styles.switch} ${value ? styles.switchActive : ""}`}
-          onClick={() => onScalarChange?.(path, !value)}
-          role="switch"
-          type="button"
-        >
-          <span className={styles.switchTrack}>
-            <span className={styles.switchThumb} />
-          </span>
-          <span className={styles.switchLabel}>{value ? "Enabled" : "Disabled"}</span>
-        </button>
-      </section>
-    );
-  }
-
-  if (typeof value === "number") {
-    return (
-      <section className={styles.fieldCard}>
-        <div className={styles.fieldMeta}>
-          <span className={styles.fieldLabel}>{label}</span>
-          <span className={styles.fieldType}>number</span>
-        </div>
-
-        <label className={styles.controlStack}>
-          <span className={styles.helperText}>Numeric input</span>
-          <input
-            className={styles.input}
-            inputMode="decimal"
-            onChange={(event) => {
-              const parsed = Number(event.currentTarget.value);
-              if (Number.isFinite(parsed)) {
-                onScalarChange?.(path, parsed);
-              }
-            }}
-            type="text"
-            value={String(value)}
-          />
-        </label>
-      </section>
-    );
-  }
-
-  if (typeof value === "string") {
-    return (
-      <section className={styles.fieldCard}>
-        <div className={styles.fieldMeta}>
-          <span className={styles.fieldLabel}>{label}</span>
-          <span className={styles.fieldType}>string</span>
-        </div>
-
-        <label className={styles.controlStack}>
-          <span className={styles.helperText}>Text input</span>
-          <input
-            className={styles.input}
-            onChange={(event) => onScalarChange?.(path, event.currentTarget.value)}
-            type="text"
-            value={value}
-          />
-        </label>
-      </section>
-    );
-  }
-
-  return (
-    <section className={styles.fieldCard}>
-      <div className={styles.fieldMeta}>
-        <span className={styles.fieldLabel}>{label}</span>
-        <span className={styles.fieldType}>null</span>
-      </div>
-
-      <div className={styles.nullBadge}>Null values render as read-only markers.</div>
-    </section>
-  );
-}
-
-function collectScalarDefaults(value: AppJsonValue, path: AppPathSegment[] = []): ScalarState {
-  if (Array.isArray(value)) {
-    return value.reduce<ScalarState>((state, childValue, index) => {
-      Object.assign(state, collectScalarDefaults(childValue, [...path, index]));
-      return state;
-    }, {});
-  }
-
-  if (isJsonObject(value)) {
-    return Object.entries(value).reduce<ScalarState>((state, [key, childValue]) => {
-      Object.assign(state, collectScalarDefaults(childValue, [...path, key]));
-      return state;
-    }, {});
-  }
-
-  if (typeof value === "number") {
-    return { [toPathKey(path)]: String(value) };
-  }
-
-  if (typeof value === "string" || typeof value === "boolean" || value === null) {
-    return { [toPathKey(path)]: value };
-  }
-
-  return {};
-}
-
-function materializeValue(
-  schema: AppJsonValue,
+function applyAppValueAtPath(
+  value: AppJsonValue,
   path: AppPathSegment[],
-  scalarState: ScalarState
+  nextValue: AppJsonValue
 ): AppJsonValue {
-  if (Array.isArray(schema)) {
-    return schema.map((childValue, index) =>
-      materializeValue(childValue, [...path, index], scalarState)
+  const clonedValue = cloneAppJsonValue(value);
+
+  if (path.length === 0) {
+    return cloneAppJsonValue(nextValue);
+  }
+
+  const rootContainer = isJsonObject(clonedValue) || Array.isArray(clonedValue)
+    ? clonedValue
+    : {};
+  let target: AppJsonValue = rootContainer;
+
+  for (let index = 0; index < path.length - 1; index += 1) {
+    const segment = path[index]!;
+    const nextSegment = path[index + 1]!;
+
+    if (typeof segment === "number") {
+      if (!Array.isArray(target)) {
+        return clonedValue;
+      }
+
+      if (!isContainerValue(target[segment])) {
+        target[segment] = typeof nextSegment === "number" ? [] : {};
+      }
+
+      target = target[segment] as AppJsonValue;
+      continue;
+    }
+
+    if (!isJsonObject(target)) {
+      return clonedValue;
+    }
+
+    if (!isContainerValue(target[segment])) {
+      target[segment] = typeof nextSegment === "number" ? [] : {};
+    }
+
+    target = target[segment];
+  }
+
+  const lastSegment = path[path.length - 1]!;
+
+  if (typeof lastSegment === "number") {
+    if (!Array.isArray(target)) {
+      return clonedValue;
+    }
+
+    target[lastSegment] = cloneAppJsonValue(nextValue);
+    return rootContainer;
+  }
+
+  if (!isJsonObject(target)) {
+    return clonedValue;
+  }
+
+  target[lastSegment] = cloneAppJsonValue(nextValue);
+  return rootContainer;
+}
+
+function parseJson5(source: string): AppJsonValue {
+  const parsedValue = JSON5.parse(source) as unknown;
+
+  if (!isAppJsonValue(parsedValue)) {
+    throw new Error(
+      "Only JSON-compatible values are supported: strings, finite numbers, booleans, null, arrays, and objects."
     );
   }
 
-  if (isJsonObject(schema)) {
-    return Object.entries(schema).reduce<JsonObject>((state, [key, childValue]) => {
-      state[key] = materializeValue(childValue, [...path, key], scalarState);
-      return state;
-    }, {});
-  }
+  return parsedValue;
+}
 
-  const fieldKey = toPathKey(path);
-
-  if (typeof schema === "number") {
-    const rawValue = scalarState[fieldKey];
-    const parsedValue = typeof rawValue === "string" ? Number(rawValue) : Number.NaN;
-    return Number.isFinite(parsedValue) ? parsedValue : schema;
-  }
-
-  if (typeof schema === "string") {
-    return typeof scalarState[fieldKey] === "string" ? scalarState[fieldKey] : schema;
-  }
-
-  if (typeof schema === "boolean") {
-    return typeof scalarState[fieldKey] === "boolean" ? scalarState[fieldKey] : schema;
-  }
-
-  return null;
+function cloneAppJsonValue(value: AppJsonValue): AppJsonValue {
+  return JSON.parse(JSON.stringify(value)) as AppJsonValue;
 }
 
 function describeJsonValue(value: AppJsonValue): string {
@@ -785,20 +891,40 @@ function describeJsonValue(value: AppJsonValue): string {
   return typeof value;
 }
 
-function parseJson5(source: string): AppJsonValue {
-  const parsedValue = JSON5.parse(source) as unknown;
-
-  if (!isAppJsonValue(parsedValue)) {
-    throw new Error(
-      "Only JSON-compatible values are supported: strings, finite numbers, booleans, null, arrays, and objects."
-    );
+function fromJsonPointer(path: string): AppPathSegment[] | null {
+  if (path === "" || path === "/") {
+    return [];
   }
 
-  return parsedValue;
+  if (!path.startsWith("/")) {
+    return null;
+  }
+
+  return path
+    .slice(1)
+    .split("/")
+    .map((segment) => decodePathSegment(segment))
+    .map((segment) => (/^\d+$/.test(segment) ? Number(segment) : segment));
 }
 
-function isJsonObject(value: AppJsonValue): value is JsonObject {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+function fromLegacyStatePath(path: string): AppPathSegment[] | null {
+  const nextPath = fromJsonPointer(path);
+
+  if (!nextPath || nextPath[0] !== ROOT_STATE_SEGMENT) {
+    return null;
+  }
+
+  return nextPath.slice(1);
+}
+
+function toLegacyStatePath(path: AppPathSegment[]): string {
+  if (!path.length) {
+    return ROOT_STATE_PATH;
+  }
+
+  return `${ROOT_STATE_PATH}/${path
+    .map((segment) => encodeURIComponent(String(segment)))
+    .join("/")}`;
 }
 
 function toPathKey(path: AppPathSegment[]): string {
@@ -813,6 +939,18 @@ function toPathKey(path: AppPathSegment[]): string {
     .join(".");
 }
 
+function decodePathSegment(segment: string): string {
+  return decodeURIComponent(segment.replace(/~1/g, "/").replace(/~0/g, "~"));
+}
+
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Unable to parse JSON5 input.";
+}
+
+function isContainerValue(value: AppJsonValue | undefined): value is AppJsonObject | AppJsonValue[] {
+  return isJsonObject(value) || Array.isArray(value);
+}
+
+function isJsonObject(value: AppJsonValue | unknown): value is AppJsonObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
